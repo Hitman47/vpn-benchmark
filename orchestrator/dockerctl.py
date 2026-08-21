@@ -1,0 +1,357 @@
+"""Pilotage des conteneurs : gluetun (le tunnel) et la sonde.
+
+L'orchestrateur s'auto-inspecte au demarrage pour decouvrir sa propre image,
+son reseau et ses volumes. Il n'a donc besoin d'aucun chemin de l'hote : la
+stack se deploie telle quelle depuis Portainer.
+
+La sonde partage la pile reseau de gluetun (network_mode=container:...), donc
+elle mesure exactement ce que verra ton conteneur applicatif en production.
+"""
+import json
+import os
+import re
+import socket
+import threading
+import time
+
+import docker
+import requests
+
+from .providers import gluetun_server_env
+
+CONTROL_PORT = 8000
+PROBE_ENTRY = ["python", "-u", "/app/probe.py"]
+
+AUTH_TOML = """# genere par vpn-benchmark : acces local sans authentification
+[[roles]]
+name = "bench"
+routes = [
+  "GET /v1/publicip/ip",
+  "GET /v1/openvpn/status",
+  "PUT /v1/openvpn/status",
+  "GET /v1/openvpn/portforwarded",
+  "GET /v1/portforwarded",
+  "GET /v1/vpn/status",
+  "PUT /v1/vpn/status",
+  "GET /v1/vpn/settings",
+]
+auth = "none"
+"""
+
+
+class VPNError(RuntimeError):
+    pass
+
+
+class Runner:
+    def __init__(self, cfg, log):
+        self.cfg = cfg
+        self.log = log
+        try:
+            self.client = docker.from_env()
+            self.client.ping()
+        except Exception as e:
+            raise SystemExit(
+                "Socket Docker inaccessible (%s).\n"
+                "La stack doit monter /var/run/docker.sock dans le conteneur." % e)
+        self.me = self._self_container()
+        self.image = self._self_image()
+        self.network = self._self_network()
+        self.net_subnet = self._network_subnet()
+        self.volumes = self._self_volumes()
+        self.auth_volume = self._write_auth_config()
+        log("image de sonde : %s" % self.image)
+        log("reseau         : %s (%s)" % (self.network, self.net_subnet))
+        log("volumes        : %s" % (self.volumes or "aucun"))
+
+    # ------------------------------------------------------------------
+    # auto-decouverte
+    # ------------------------------------------------------------------
+    def _self_container(self):
+        for name in (self.cfg.self_name, socket.gethostname()):
+            if not name:
+                continue
+            try:
+                return self.client.containers.get(name)
+            except docker.errors.APIError:
+                pass
+        # dernier recours : identifiant lu dans le cgroup / mountinfo
+        for path in ("/proc/self/mountinfo", "/proc/self/cgroup"):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    m = re.search(r"([0-9a-f]{64})", f.read())
+                if m:
+                    return self.client.containers.get(m.group(1))
+            except (OSError, docker.errors.APIError):
+                continue
+        raise SystemExit(
+            "Impossible de m'identifier parmi les conteneurs Docker.\n"
+            "Verifie que le service porte bien container_name: %s"
+            % self.cfg.self_name)
+
+    def _self_image(self):
+        img = (self.me.attrs.get("Config") or {}).get("Image")
+        if img and not img.startswith("sha256:"):
+            return img
+        return self.me.attrs.get("Image") or img
+
+    def _self_network(self):
+        nets = self.me.attrs["NetworkSettings"]["Networks"]
+        for name in nets:
+            if name != "host":
+                return name
+        # pas de reseau exploitable : on en cree un
+        name = "%s-net" % self.cfg.project
+        try:
+            self.client.networks.get(name)
+        except docker.errors.NotFound:
+            self.client.networks.create(name, driver="bridge")
+        return name
+
+    def _network_subnet(self):
+        try:
+            net = self.client.networks.get(self.network)
+            return net.attrs["IPAM"]["Config"][0]["Subnet"]
+        except (docker.errors.APIError, KeyError, IndexError, TypeError):
+            return "172.16.0.0/12"
+
+    def _self_volumes(self):
+        vols = {}
+        for m in self.me.attrs.get("Mounts") or []:
+            if m.get("Type") == "volume" and m.get("Name"):
+                vols[m.get("Destination")] = m["Name"]
+        return vols
+
+    def _write_auth_config(self):
+        """Ecrit la config d'authentification de gluetun dans un volume partage.
+        Retourne le nom du volume, ou None si le volume n'est pas monte."""
+        vol = self.volumes.get("/shared/auth")
+        if not vol:
+            return None
+        try:
+            os.makedirs("/shared/auth", exist_ok=True)
+            with open("/shared/auth/config.toml", "w", encoding="utf-8") as f:
+                f.write(AUTH_TOML)
+            return vol
+        except OSError as e:
+            self.log("config auth gluetun non ecrite (%s)" % e)
+            return None
+
+    # ------------------------------------------------------------------
+    def cleanup(self, prefix=None):
+        prefix = prefix or self.cfg.project + "-"
+        for c in self.client.containers.list(all=True):
+            if c.id == self.me.id or not c.name.startswith(prefix):
+                continue
+            if c.name == self.cfg.self_name:
+                continue
+            try:
+                c.remove(force=True)
+            except docker.errors.APIError:
+                pass
+
+    # ------------------------------------------------------------------
+    # gluetun
+    # ------------------------------------------------------------------
+    def start_vpn(self, provider, server, extra_env=None):
+        name = "%s-vpn" % self.cfg.project
+        try:
+            self.client.containers.get(name).remove(force=True)
+        except docker.errors.APIError:
+            pass
+
+        pcfg = self.cfg.providers[provider]
+        env = {
+            "VPN_SERVICE_PROVIDER": pcfg["gluetun_provider"],
+            "VPN_TYPE": "wireguard",
+            "TZ": self.cfg.tz,
+            "DOT": "off",   # DNS-over-TLS off : on veut mesurer le resolveur du VPN
+            "FIREWALL_OUTBOUND_SUBNETS": "%s,%s" % (self.net_subnet,
+                                                    self.cfg.lan_subnet),
+            "FIREWALL_INPUT_PORTS": "8000,8080",
+            "HTTP_CONTROL_SERVER_ADDRESS": ":%d" % CONTROL_PORT,
+            "HEALTH_TARGET_ADDRESS": "1.1.1.1:443",
+            "LOG_LEVEL": "info",
+            "UPDATER_PERIOD": "0",
+        }
+        env.update(self.cfg.keys[provider])
+        env.update(gluetun_server_env(provider, server))
+        if pcfg.get("port_forwarding"):
+            env["VPN_PORT_FORWARDING"] = "on"
+            env["VPN_PORT_FORWARDING_PROVIDER"] = pcfg["gluetun_provider"]
+        env.update(extra_env or {})
+
+        volumes = {}
+        if self.auth_volume:
+            volumes[self.auth_volume] = {"bind": "/gluetun/auth", "mode": "ro"}
+
+        t0 = time.time()
+        container = self.client.containers.run(
+            self.cfg.gluetun_image, name=name, detach=True,
+            cap_add=["NET_ADMIN"], devices=["/dev/net/tun:/dev/net/tun:rwm"],
+            sysctls={"net.ipv4.conf.all.src_valid_mark": "1"},
+            environment=env, network=self.network, volumes=volumes,
+            labels={"vpnbench": "1"},
+        )
+        ip = self._wait_ready(container, t0)
+        return container, round(time.time() - t0, 2), ip
+
+    def _container_ip(self, container):
+        container.reload()
+        nets = container.attrs["NetworkSettings"]["Networks"]
+        if self.network in nets and nets[self.network].get("IPAddress"):
+            return nets[self.network]["IPAddress"]
+        for n in nets.values():
+            if n.get("IPAddress"):
+                return n["IPAddress"]
+        raise VPNError("pas d'IP pour %s" % container.name)
+
+    def control_url(self, container, path):
+        return "http://%s:%d%s" % (self._container_ip(container), CONTROL_PORT, path)
+
+    def _wait_ready(self, container, t0):
+        """Attend que gluetun annonce une IP publique via son control server."""
+        timeout = self.cfg.rt("gluetun_ready_timeout", 120)
+        last_err = None
+        while time.time() - t0 < timeout:
+            container.reload()
+            if container.status not in ("running", "created"):
+                logs = container.logs(tail=25).decode("utf-8", "replace")
+                raise VPNError("gluetun arrete (%s):\n%s" % (container.status, logs))
+            try:
+                r = requests.get(self.control_url(container, "/v1/publicip/ip"),
+                                 timeout=4)
+                if r.status_code == 200:
+                    d = r.json()
+                    if d.get("public_ip"):
+                        return d
+                elif r.status_code == 401:
+                    raise VPNError(
+                        "control server protege : ajoute le volume /shared/auth "
+                        "a la stack (voir docker-compose.yml)")
+            except (requests.RequestException, ValueError) as e:
+                last_err = e
+            time.sleep(2)
+        logs = container.logs(tail=30).decode("utf-8", "replace")
+        raise VPNError("tunnel non etabli en %ss (%s)\n%s" % (timeout, last_err, logs))
+
+    def forwarded_port(self, container):
+        for path in ("/v1/portforwarded", "/v1/openvpn/portforwarded"):
+            try:
+                r = requests.get(self.control_url(container, path), timeout=5)
+                if r.status_code == 200:
+                    d = r.json()
+                    port = d.get("port") or (d.get("ports") or [None])[0]
+                    if port:
+                        return int(port)
+            except (requests.RequestException, ValueError, VPNError, TypeError):
+                continue
+        return None
+
+    def set_vpn_status(self, container, status):
+        """status = 'stopped' | 'running' (sert au test de kill-switch)."""
+        body = json.dumps({"status": status})
+        for path in ("/v1/vpn/status", "/v1/openvpn/status"):
+            try:
+                r = requests.put(self.control_url(container, path), data=body,
+                                 timeout=10)
+                if r.status_code in (200, 202):
+                    return True
+            except (requests.RequestException, VPNError):
+                continue
+        return False
+
+    # ------------------------------------------------------------------
+    # sonde
+    # ------------------------------------------------------------------
+    def probe(self, vpn_container, args, timeout=None):
+        """Lance la sonde dans la pile reseau donnee et renvoie le JSON."""
+        timeout = timeout or self.cfg.rt("probe_timeout", 240)
+        kwargs = {
+            "image": self.image,
+            "command": PROBE_ENTRY + [str(a) for a in args],
+            "detach": True,
+            "name": "%s-probe-%d" % (self.cfg.project,
+                                     int(time.time() * 1000) % 1000000),
+            "environment": {"TZ": self.cfg.tz},
+            "labels": {"vpnbench": "1"},
+        }
+        if vpn_container is not None:
+            kwargs["network_mode"] = "container:%s" % vpn_container.name
+        else:
+            kwargs["network"] = self.network
+        try:
+            c = self.client.containers.run(**kwargs)
+        except docker.errors.APIError as e:
+            return {"ok": False, "error": "creation sonde: %s" % e}
+        try:
+            res = c.wait(timeout=timeout)
+            raw = c.logs(stdout=True, stderr=False).decode("utf-8", "replace")
+            err = c.logs(stdout=False, stderr=True).decode("utf-8", "replace")
+            for line in reversed(raw.strip().splitlines()):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        return json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+            return {"ok": False, "error": "sortie sonde illisible",
+                    "exit_code": res.get("StatusCode"), "stderr": err[-500:]}
+        except Exception as e:
+            return {"ok": False, "error": "probe: %s" % e}
+        finally:
+            try:
+                c.remove(force=True)
+            except docker.errors.APIError:
+                pass
+
+    # ------------------------------------------------------------------
+    # mesure CPU du conteneur VPN (detecte un NAS qui plafonne avant le VPN)
+    # ------------------------------------------------------------------
+    def cpu_sampler(self, container):
+        return _CPUSampler(container)
+
+
+class _CPUSampler(threading.Thread):
+    def __init__(self, container, interval=2.0):
+        super().__init__(daemon=True)
+        self.container = container
+        self.interval = interval
+        self.samples = []
+        self._stop = threading.Event()
+
+    def run(self):
+        prev = None
+        while not self._stop.is_set():
+            try:
+                s = self.container.stats(stream=False)
+                pct = _cpu_percent(s, prev)
+                if pct is not None:
+                    self.samples.append(pct)
+                prev = s
+            except Exception:
+                pass
+            self._stop.wait(self.interval)
+
+    def stop(self):
+        self._stop.set()
+        self.join(timeout=5)
+        if not self.samples:
+            return {"cpu_avg_pct": None, "cpu_max_pct": None}
+        return {"cpu_avg_pct": round(sum(self.samples) / len(self.samples), 1),
+                "cpu_max_pct": round(max(self.samples), 1)}
+
+
+def _cpu_percent(s, prev=None):
+    try:
+        cpu = s["cpu_stats"]
+        pre = s["precpu_stats"] if prev is None else prev["cpu_stats"]
+        d_cpu = cpu["cpu_usage"]["total_usage"] - pre["cpu_usage"]["total_usage"]
+        d_sys = cpu["system_cpu_usage"] - pre["system_cpu_usage"]
+        ncpu = cpu.get("online_cpus") or len(
+            cpu["cpu_usage"].get("percpu_usage") or [1])
+        if d_sys > 0 and d_cpu >= 0:
+            return 100.0 * d_cpu / d_sys * ncpu
+    except (KeyError, TypeError, ZeroDivisionError):
+        return None
+    return None

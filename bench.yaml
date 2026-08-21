@@ -1,0 +1,107 @@
+# =============================================================
+# VPN Benchmark - parametres de mesure
+# Tout ce qui est ajustable sans toucher au code est ici.
+# =============================================================
+
+providers:
+  nordvpn:
+    label: NordVPN
+    gluetun_provider: nordvpn
+    port_forwarding: false        # NordVPN ne fait pas de port forwarding
+  protonvpn:
+    label: ProtonVPN
+    gluetun_provider: protonvpn
+    port_forwarding: true         # NAT-PMP supporte par gluetun
+
+# --- Modes d'execution ---------------------------------------
+modes:
+  smoke:
+    rounds: 1
+    interval_seconds: 0
+    countries: [Netherlands]
+    servers_per_country: 1
+    include_baseline: true
+    latency_count: 15
+    throughput_seconds: 8
+    throughput_streams: 8
+    web_repeats: 2
+    p2p_every_rounds: 1
+    p2p_minutes: 3
+    killswitch_test: true
+
+  full:
+    rounds: 24                    # 24 rounds x 1h = ~24h
+    interval_seconds: 3600        # temps minimum entre 2 debuts de round
+    countries: [Netherlands, Switzerland, Sweden]
+    servers_per_country: 2
+    include_baseline: true
+    latency_count: 30
+    throughput_seconds: 12
+    throughput_streams: 8
+    web_repeats: 3
+    p2p_every_rounds: 4           # test torrent 1 round sur 4 (couteux)
+    p2p_minutes: 8
+    killswitch_test: true
+
+# --- Cibles de mesure ----------------------------------------
+targets:
+  ping:
+    - 1.1.1.1
+    - 8.8.8.8
+    - 9.9.9.9
+  web:
+    - https://www.cloudflare.com/
+    - https://www.wikipedia.org/
+    - https://github.com/
+    - https://www.reddit.com/
+  # Serveurs iperf3 publics (optionnel, laisser vide pour desactiver)
+  iperf3: []
+  #  - {host: speedtest.serverius.net, port: 5002}
+
+# --- P2P / torrent -------------------------------------------
+p2p:
+  enabled: true
+  # Torrents legaux, bien seedes. Remplacer par une version courante si 404.
+  torrents:
+    - https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso.torrent
+  # Coupe le telechargement au-dela de ce volume (Go) pour ne pas exploser le quota
+  max_download_gb: 4
+  qbittorrent_image: linuxserver/qbittorrent:latest
+
+# --- Ponderation du score final (total libre, normalise ensuite)
+scoring:
+  weights:
+    throughput_down_mbps: 18
+    throughput_up_mbps: 10
+    latency_avg_ms: 12
+    jitter_ms: 6
+    packet_loss_pct: 6
+    loaded_latency_delta_ms: 8    # bufferbloat
+    web_ttfb_ms: 6
+    connect_seconds: 4
+    success_rate_pct: 10
+    p2p_down_mbps: 10
+    p2p_incoming_peers: 5
+    port_forward_ok: 8
+    leak_count: 12
+  # Sens de lecture: true = plus c'est haut mieux c'est
+  higher_is_better:
+    throughput_down_mbps: true
+    throughput_up_mbps: true
+    latency_avg_ms: false
+    jitter_ms: false
+    packet_loss_pct: false
+    loaded_latency_delta_ms: false
+    web_ttfb_ms: false
+    connect_seconds: false
+    success_rate_pct: true
+    p2p_down_mbps: true
+    p2p_incoming_peers: true
+    port_forward_ok: true
+    leak_count: false
+
+# --- Divers ---------------------------------------------------
+runtime:
+  gluetun_ready_timeout: 120      # secondes avant d'abandonner une connexion
+  probe_timeout: 240
+  between_cases_seconds: 5

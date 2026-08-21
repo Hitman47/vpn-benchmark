@@ -1,0 +1,3 @@
+# Les fichiers sont consommes par un build Docker sous Linux : LF impose.
+* text=auto eol=lf
+*.ps1 text eol=crlf

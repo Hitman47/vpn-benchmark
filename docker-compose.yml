@@ -1,0 +1,58 @@
+# =============================================================================
+# Stack Portainer - VPN Benchmark (NordVPN vs ProtonVPN)
+#
+# Methode recommandee : Portainer > Stacks > Add stack > Repository
+#   - Repository URL      : l'URL de ton depot Git
+#   - Compose path        : docker-compose.yml
+#   - Laisse "Pull latest image" DESACTIVE (l'image est construite localement)
+#   - Renseigne les variables d'environnement plus bas dans le formulaire
+#
+# Si tu preferes coller un compose sans depot Git, utilise
+# docker-compose.registry.yml (necessite une image deja publiee).
+# =============================================================================
+services:
+  vpnbench:
+    # image locale construite depuis le depot ; compose la construit si absente
+    image: ${BENCH_IMAGE:-vpnbench:latest}
+    build: .
+    container_name: vpnbench-orchestrator   # ne pas renommer : le conteneur s'auto-inspecte
+    environment:
+      # --- obligatoire ------------------------------------------------------
+      NORD_WIREGUARD_PRIVATE_KEY: ${NORD_WIREGUARD_PRIVATE_KEY}
+      PROTON_WIREGUARD_PRIVATE_KEY: ${PROTON_WIREGUARD_PRIVATE_KEY}
+      # --- environnement ----------------------------------------------------
+      PROTON_WIREGUARD_ADDRESSES: ${PROTON_WIREGUARD_ADDRESSES:-10.2.0.2/32}
+      LAN_SUBNET: ${LAN_SUBNET:-192.168.1.0/24}
+      TZ: ${TZ:-Europe/Paris}
+      GLUETUN_IMAGE: ${GLUETUN_IMAGE:-qmcgaw/gluetun:v3.40}
+      # --- campagne ---------------------------------------------------------
+      BENCH_MODE: ${BENCH_MODE:-smoke}          # smoke | full | report
+      BENCH_COUNTRIES: ${BENCH_COUNTRIES:-}     # ex: Netherlands,Switzerland,Sweden
+      BENCH_ROUNDS: ${BENCH_ROUNDS:-}
+      BENCH_INTERVAL_MINUTES: ${BENCH_INTERVAL_MINUTES:-}
+      BENCH_SERVERS_PER_COUNTRY: ${BENCH_SERVERS_PER_COUNTRY:-}
+      BENCH_P2P_ENABLED: ${BENCH_P2P_ENABLED:-}
+      BENCH_P2P_MINUTES: ${BENCH_P2P_MINUTES:-}
+      BENCH_P2P_EVERY_ROUNDS: ${BENCH_P2P_EVERY_ROUNDS:-}
+      BENCH_MAX_DOWNLOAD_GB: ${BENCH_MAX_DOWNLOAD_GB:-}
+      BENCH_THROUGHPUT_SECONDS: ${BENCH_THROUGHPUT_SECONDS:-}
+      BENCH_THROUGHPUT_STREAMS: ${BENCH_THROUGHPUT_STREAMS:-}
+      BENCH_KILLSWITCH: ${BENCH_KILLSWITCH:-}
+      BENCH_HTTP_PORT: 8888
+    ports:
+      # rapport HTML consultable au navigateur : http://<ip-du-nas>:8888/
+      - "${BENCH_WEB_PORT:-8888}:8888"
+    volumes:
+      # requis : l'orchestrateur cree et detruit les conteneurs gluetun/sonde
+      - /var/run/docker.sock:/var/run/docker.sock
+      - results:/app/results        # base SQLite, CSV, report.html
+      - auth:/shared/auth           # config d'auth du control server gluetun
+      - qbt:/shared/qbt             # config qBittorrent generee
+      - downloads:/shared/downloads # telechargements du test P2P (vides apres)
+    restart: on-failure:3
+
+volumes:
+  results:
+  auth:
+  qbt:
+  downloads:
