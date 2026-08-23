@@ -95,28 +95,84 @@ base SQLite du volume `results`.
 
 ## 3. Variables d'environnement
 
-Obligatoires : `NORD_WIREGUARD_PRIVATE_KEY`, `PROTON_WIREGUARD_PRIVATE_KEY`.
+Une seule chose est obligatoire : les deux clés WireGuard. **Toute variable
+laissée vide reprend la valeur de `bench.yaml` pour le mode choisi** — il n'y a
+donc rien d'autre à remplir pour démarrer.
+
+### Obligatoires
+
+| Variable | Effet |
+|---|---|
+| `NORD_WIREGUARD_PRIVATE_KEY` | clé privée NordLynx |
+| `PROTON_WIREGUARD_PRIVATE_KEY` | clé privée ProtonVPN |
+
+### Environnement
 
 | Variable | Défaut | Effet |
 |---|---|---|
-| `BENCH_MODE` | `smoke` | `smoke` / `full` / `report` |
 | `LAN_SUBNET` | `192.168.1.0/24` | autorise l'accès local à travers le pare-feu gluetun |
-| `BENCH_WEB_PORT` | `8888` | port du rapport sur le NAS |
-| `BENCH_COUNTRIES` | selon le mode | ex. `Netherlands,Switzerland,Sweden` |
-| `BENCH_ROUNDS` | 1 (smoke) / 24 (full) | nombre de passes |
-| `BENCH_INTERVAL_MINUTES` | 60 en `full` | espacement entre deux passes |
-| `BENCH_SERVERS_PER_COUNTRY` | 1 / 2 | serveurs testés par pays |
-| `BENCH_P2P_ENABLED` | `true` | active le test torrent réel |
-| `BENCH_P2P_MINUTES` | 3 / 8 | durée d'un test torrent |
-| `BENCH_P2P_EVERY_ROUNDS` | 1 / 4 | fréquence du test torrent |
-| `BENCH_MAX_DOWNLOAD_GB` | 4 | garde-fou sur le volume téléchargé |
-| `BENCH_KILLSWITCH` | `true` | coupe le tunnel à chaud pour tester l'étanchéité |
+| `TZ` | `Europe/Paris` | fuseau horaire des logs et du rapport |
 | `PROTON_WIREGUARD_ADDRESSES` | `10.2.0.2/32` | adresse fournie avec la config Proton |
 | `GLUETUN_IMAGE` | `qmcgaw/gluetun:v3.40` | version de gluetun évaluée |
+| `BENCH_IMAGE` | image GHCR | pour épingler un tag précis, ex. `…:sha-c8e7851` |
+| `BENCH_WEB_PORT` | `8888` | port du rapport **côté NAS** (mapping du compose) |
 
-Tout le reste (cibles ping, sites web, torrents, **pondération du score**) est
-dans `bench.yaml`, embarqué dans l'image. Pour le modifier sans reconstruire :
-monte un volume sur `/config` et dépose-y ton propre `bench.yaml`.
+### Campagne
+
+| Variable | Défaut smoke / full | Effet |
+|---|---|---|
+| `BENCH_MODE` | `smoke` | `smoke` / `full` / `report` |
+| `BENCH_COUNTRIES` | `Netherlands` / `Netherlands,Switzerland,Sweden` | pays de sortie testés |
+| `BENCH_ROUNDS` | `1` / `24` | nombre de passes |
+| `BENCH_INTERVAL_MINUTES` | `0` / `60` | espacement entre deux débuts de passe |
+| `BENCH_SERVERS_PER_COUNTRY` | `1` / `2` | serveurs testés par pays |
+| `BENCH_INCLUDE_BASELINE` | `true` | mesure sans VPN à chaque round |
+
+### P2P
+
+| Variable | Défaut smoke / full | Effet |
+|---|---|---|
+| `BENCH_P2P_ENABLED` | `true` | active le test torrent réel |
+| `BENCH_P2P_MINUTES` | `3` / `8` | durée d'un test torrent |
+| `BENCH_P2P_EVERY_ROUNDS` | `1` / `4` | fréquence du test torrent |
+| `BENCH_MAX_DOWNLOAD_GB` | `4` | garde-fou sur le volume téléchargé |
+
+### Réglage fin des mesures
+
+| Variable | Défaut smoke / full | Effet |
+|---|---|---|
+| `BENCH_THROUGHPUT_SECONDS` | `8` / `12` | durée d'un test de débit |
+| `BENCH_THROUGHPUT_STREAMS` | `8` | flux parallèles en descendant (moitié en montant) |
+| `BENCH_LATENCY_COUNT` | `15` / `30` | pings par cible |
+| `BENCH_WEB_REPEATS` | `2` / `3` | répétitions par URL |
+| `BENCH_KILLSWITCH` | `true` | coupe le tunnel à chaud pour tester l'étanchéité |
+
+### Cibles (listes séparées par des virgules)
+
+| Variable | Défaut | Effet |
+|---|---|---|
+| `BENCH_PING_TARGETS` | `1.1.1.1,8.8.8.8,9.9.9.9` | cibles de latence |
+| `BENCH_WEB_URLS` | 4 sites, voir `bench.yaml` | pages mesurées en TTFB |
+| `BENCH_TORRENTS` | ISO Ubuntu 24.04 | `.torrent` utilisés pour le test P2P |
+
+### Interne (à ne changer qu'en connaissance de cause)
+
+| Variable | Défaut | Effet |
+|---|---|---|
+| `BENCH_HTTP_PORT` | `8888` | port d'écoute **dans** le conteneur |
+| `BENCH_KEEP_ALIVE` | `true` | `false` = le conteneur s'arrête à la fin du run |
+| `BENCH_YAML` | — | chemin d'un `bench.yaml` personnalisé |
+| `BENCH_RESULTS` | `/app/results` | dossier des résultats dans le conteneur |
+| `BENCH_SELF_NAME` | `vpnbench-orchestrator` | nom du conteneur, sert à l'auto-inspection |
+| `BENCH_PROJECT` | `vpnbench` | préfixe des conteneurs créés par l'orchestrateur |
+
+### Aller plus loin que les variables
+
+Les poids du score, les serveurs iperf3 et le détail des modes vivent dans
+`bench.yaml`, embarqué dans l'image. Pour le surcharger sans reconstruire :
+décommente le volume `config:/config` dans le compose et dépose ton propre
+`bench.yaml` dedans (l'ordre de recherche est `BENCH_YAML`, puis
+`/config/bench.yaml`, puis celui de l'image).
 
 ---
 

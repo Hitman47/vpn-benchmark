@@ -31,8 +31,17 @@ services:
       BENCH_MAX_DOWNLOAD_GB: ${BENCH_MAX_DOWNLOAD_GB:-}
       BENCH_THROUGHPUT_SECONDS: ${BENCH_THROUGHPUT_SECONDS:-}
       BENCH_THROUGHPUT_STREAMS: ${BENCH_THROUGHPUT_STREAMS:-}
+      BENCH_LATENCY_COUNT: ${BENCH_LATENCY_COUNT:-}
+      BENCH_WEB_REPEATS: ${BENCH_WEB_REPEATS:-}
       BENCH_KILLSWITCH: ${BENCH_KILLSWITCH:-}
-      BENCH_HTTP_PORT: 8888
+      BENCH_INCLUDE_BASELINE: ${BENCH_INCLUDE_BASELINE:-}
+      # --- cibles de mesure (listes separees par des virgules) ---------------
+      BENCH_PING_TARGETS: ${BENCH_PING_TARGETS:-}
+      BENCH_WEB_URLS: ${BENCH_WEB_URLS:-}
+      BENCH_TORRENTS: ${BENCH_TORRENTS:-}
+      # --- interne ----------------------------------------------------------
+      BENCH_HTTP_PORT: 8888                     # port dans le conteneur
+      BENCH_KEEP_ALIVE: ${BENCH_KEEP_ALIVE:-true}  # false = le conteneur s'arrete a la fin
     ports:
       # rapport HTML consultable au navigateur : http://<ip-du-nas>:8888/
       - "${BENCH_WEB_PORT:-8888}:8888"
@@ -43,10 +52,14 @@ services:
       - auth:/shared/auth           # config d'auth du control server gluetun
       - qbt:/shared/qbt             # config qBittorrent generee
       - downloads:/shared/downloads # telechargements du test P2P (vides apres)
+      # facultatif : deposer un bench.yaml personnalise dans ce volume pour
+      # surcharger celui embarque dans l'image (poids du score, cibles, etc.)
+      # - config:/config
     restart: on-failure:3
 
 volumes:
   results:
+  # config:
   auth:
   qbt:
   downloads:
