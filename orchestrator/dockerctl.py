@@ -7,10 +7,12 @@ stack se deploie telle quelle depuis Portainer.
 La sonde partage la pile reseau de gluetun (network_mode=container:...), donc
 elle mesure exactement ce que verra ton conteneur applicatif en production.
 """
+import io
 import json
 import os
 import re
 import socket
+import tarfile
 import threading
 import time
 
@@ -152,6 +154,50 @@ class Runner:
         except OSError as e:
             self.log("config auth gluetun non ecrite (%s)" % e)
             return None
+
+    # ------------------------------------------------------------------
+    def fetch_server_catalog(self):
+        """Recupere servers.json depuis gluetun lui-meme.
+
+        C'est la seule liste qui fasse autorite : gluetun refuse tout serveur
+        qui n'y figure pas, et l'API ProtonVPN exige desormais un token. On
+        demarre gluetun sans cle : il ecrit son catalogue puis s'arrete sur
+        l'erreur de configuration, et on extrait le fichier du conteneur.
+        """
+        name = "%s-catalog" % self.cfg.project
+        try:
+            self.client.containers.get(name).remove(force=True)
+        except docker.errors.APIError:
+            pass
+        container = None
+        try:
+            container = self.client.containers.run(
+                self.cfg.gluetun_image, name=name, detach=True,
+                environment={"VPN_SERVICE_PROVIDER": "nordvpn",
+                             "VPN_TYPE": "wireguard", "LOG_LEVEL": "info"},
+                network=self.network, labels={"vpnbench": "1"})
+            container.wait(timeout=90)   # sortie en erreur attendue : pas de cle
+            bits, _ = container.get_archive("/gluetun/servers.json")
+            buf = io.BytesIO(b"".join(bits))
+            with tarfile.open(fileobj=buf) as tar:
+                member = next(m for m in tar.getmembers() if m.isfile())
+                data = json.loads(tar.extractfile(member).read().decode("utf-8"))
+            counts = {k: len(v.get("servers") or [])
+                      for k, v in data.items() if isinstance(v, dict)}
+            self.log("catalogue gluetun : %s"
+                     % ", ".join("%s=%d" % (k, n) for k, n in sorted(counts.items())
+                                 if n))
+            return data
+        except Exception as e:
+            self.log("catalogue gluetun indisponible (%s) : selection par pays "
+                     "uniquement" % e)
+            return None
+        finally:
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except docker.errors.APIError:
+                    pass
 
     # ------------------------------------------------------------------
     def cleanup(self, prefix=None):
@@ -381,11 +427,13 @@ class _CPUSampler(threading.Thread):
         self.container = container
         self.interval = interval
         self.samples = []
-        self._stop = threading.Event()
+        # NE PAS nommer cet attribut _stop : Thread._stop() existe deja
+        # et join() l'appelle en interne.
+        self._halt = threading.Event()
 
     def run(self):
         prev = None
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             try:
                 s = self.container.stats(stream=False)
                 pct = _cpu_percent(s, prev)
@@ -394,11 +442,16 @@ class _CPUSampler(threading.Thread):
                 prev = s
             except Exception:
                 pass
-            self._stop.wait(self.interval)
+            self._halt.wait(self.interval)
 
     def stop(self):
-        self._stop.set()
-        self.join(timeout=5)
+        """Ne doit jamais faire echouer la mesure en cours : au pire on rend
+        des valeurs vides."""
+        try:
+            self._halt.set()
+            self.join(timeout=5)
+        except Exception:
+            pass
         if not self.samples:
             return {"cpu_avg_pct": None, "cpu_max_pct": None}
         return {"cpu_avg_pct": round(sum(self.samples) / len(self.samples), 1),

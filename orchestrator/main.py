@@ -70,6 +70,16 @@ class Bench:
         self.baseline_asn = None
         self.baseline_ip = None
         self.download_url = None
+        self._catalog = None
+        self._catalog_done = False
+
+    # ------------------------------------------------------------------
+    def catalog(self):
+        """Catalogue de serveurs de gluetun, recupere une seule fois."""
+        if not self._catalog_done:
+            self._catalog = self.runner.fetch_server_catalog()
+            self._catalog_done = True
+        return self._catalog
 
     # ------------------------------------------------------------------
     def preflight(self):
@@ -80,7 +90,8 @@ class Bench:
         for provider in self.cfg.providers:
             for country in self.cfg.m("countries", ["Netherlands"]):
                 log("%s / %s" % (provider, country))
-                servers = prov.pick_servers(provider, country, 1, log)
+                servers = prov.pick_servers(provider, country, 1, log,
+                                            self.catalog())
                 server = servers[0]
                 vpn = None
                 row = {"provider": provider, "country": country,
@@ -192,7 +203,8 @@ class Bench:
         for provider in self.cfg.providers:
             servers = []
             for country in self.cfg.m("countries", ["Netherlands"]):
-                picked = prov.pick_servers(provider, country, n, log)
+                picked = prov.pick_servers(provider, country, n, log,
+                                           self.catalog())
                 for s in picked:
                     log("  %-10s %-14s %-22s charge=%s p2p=%s"
                         % (provider, country, s["name"], s["load"], s["p2p"]))
@@ -341,6 +353,8 @@ class Bench:
                          "exit_asn": ident.get("asn"), "exit_org": ident.get("org"),
                          "exit_country": ident.get("country") or ipinfo.get("country")})
             self.db.add_case(case)
+            log("  sortie : %s (%s) %s" % (case["exit_ip"], case["exit_country"],
+                                           case["exit_org"]))
 
             # --- securite / fuites
             leaks = self.runner.probe(vpn, ["leaks"])
@@ -356,12 +370,19 @@ class Bench:
                 vpn, ["latency", "--targets", ",".join(self.cfg.targets["ping"]),
                       "--count", str(self.cfg.m("latency_count", 20))])
             sampler = self.runner.cpu_sampler(vpn)
-            sampler.start()
+            try:
+                sampler.start()
+            except Exception as e:
+                log("  echantillonnage CPU indisponible (%s)" % e)
             throughput = self.runner.probe(
                 vpn, ["throughput", "--seconds", str(self.cfg.m("throughput_seconds", 10)),
                       "--streams", str(self.cfg.m("throughput_streams", 8))]
                 + (["--url", self.download_url] if self.download_url else []))
-            cpu = sampler.stop()
+            try:
+                cpu = sampler.stop()
+            except Exception as e:   # jamais au detriment des mesures reseau
+                log("  echantillonnage CPU ignore (%s)" % e)
+                cpu = {}
             self.metric(case_id, "cpu_avg_pct", cpu.get("cpu_avg_pct"), "%")
             self.metric(case_id, "cpu_max_pct", cpu.get("cpu_max_pct"), "%")
             loaded = self.runner.probe(

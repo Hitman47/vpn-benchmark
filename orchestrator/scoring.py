@@ -162,6 +162,21 @@ class Scorer:
                     "reason": "aucun tunnel n'a pu etre etabli : rien a comparer. "
                               "Voir les fichiers de /failures/ et la section "
                               "Incidents du rapport."}
+        # Une campagne qui n'a mesure que des metriques marginales ne permet
+        # pas de conclure : on exige que la moitie du poids total soit couverte.
+        total_weight = sum(self.weights.values()) or 1
+        coverage = max((scores[p]["max_points"] for p in vpns), default=0) / total_weight
+        if coverage < 0.5:
+            manquantes = [m for m in self.weights
+                          if all(agg[p].get(m) is None for p in vpns)]
+            return {"winner": None, "ranking": vpns, "confidence": "nulle",
+                    "coverage": round(100 * coverage),
+                    "countries": getattr(self, "kept_countries", []),
+                    "excluded_countries": getattr(self, "excluded_countries", []),
+                    "reason": "seulement %d%% du poids du score a pu etre mesure ; "
+                              "metriques absentes : %s"
+                              % (round(100 * coverage), ", ".join(manquantes[:8]))}
+
         winner = vpns[0]
         gap = (scores[winner]["score"] - scores[vpns[-1]]["score"]
                if len(vpns) > 1 else 0)
@@ -185,6 +200,7 @@ class Scorer:
         elif gap >= 4 and n >= 6:
             confidence = "moyenne"
         return {"winner": winner, "gap": round(gap, 1),
+                "coverage": round(100 * coverage),
                 "confidence": confidence, "top_reasons": reasons,
                 "ranking": vpns,
                 "countries": getattr(self, "kept_countries", []),

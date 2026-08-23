@@ -1,9 +1,15 @@
 """Selection des serveurs a tester chez chaque provider.
 
 Une seule cle WireGuard de compte suffit pour joindre n'importe quel serveur du
-provider : gluetun embarque les cles publiques et les endpoints. Ce module ne
-sert donc qu'a CHOISIR les serveurs (pays, capacite P2P, charge) et a produire
-les variables d'environnement gluetun qui epinglent ce serveur precis.
+provider : gluetun substitue l'endpoint et la cle publique du serveur choisi.
+Ce module ne sert donc qu'a CHOISIR les serveurs et a produire les variables
+d'environnement qui les epinglent.
+
+Source de verite : le catalogue embarque dans gluetun (servers.json). C'est le
+seul qui garantisse que gluetun acceptera le serveur, et l'API ProtonVPN exige
+desormais un token d'authentification. L'API NordVPN, elle, reste ouverte : on
+s'en sert uniquement pour connaitre la charge et tester les serveurs les moins
+occupes.
 """
 import json
 import urllib.parse
@@ -20,9 +26,6 @@ ISO = {
     "Portugal": "PT", "Czech Republic": "CZ", "Czechia": "CZ",
 }
 
-PROTON_FEATURE_P2P = 4
-PROTON_FEATURE_TOR = 2
-
 
 def _get_json(url, headers=None):
     req = urllib.request.Request(url, headers=headers or {
@@ -31,141 +34,116 @@ def _get_json(url, headers=None):
         return json.loads(r.read().decode("utf-8", "replace"))
 
 
+def _first(d, *keys):
+    for k in keys:
+        if k in d and d[k] not in (None, ""):
+            return d[k]
+    return None
+
+
 # --------------------------------------------------------------------------
-# NordVPN
+# catalogue gluetun
+# --------------------------------------------------------------------------
+def catalog_servers(catalog, provider, country, limit, p2p_only=True):
+    """Serveurs du provider dans ce pays, tels que gluetun les connait."""
+    if not catalog:
+        return []
+    block = catalog.get(provider) or {}
+    entries = block.get("servers") or []
+    wanted = country.strip().lower()
+    out = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        if str(_first(e, "country") or "").strip().lower() != wanted:
+            continue
+        if str(_first(e, "vpn") or "wireguard").lower() not in ("wireguard", ""):
+            continue
+        if not _first(e, "wgpubkey", "wg_pub_key"):
+            continue          # pas de cle publique = pas utilisable en WireGuard
+        if e.get("free") or e.get("secure_core") or e.get("tor"):
+            continue
+        name = _first(e, "server_name", "name", "hostname")
+        # nom lisible dans le rapport ; l'epinglage se fait sur le hostname
+        label = name
+        if provider == "nordvpn" and e.get("number"):
+            label = "%s #%s" % (country, e["number"])
+        out.append({
+            "provider": provider,
+            "name": label,
+            "id": name,
+            "hostname": _first(e, "hostname"),
+            "ip": (e.get("ips") or [None])[0],
+            "country": country,
+            "city": _first(e, "city"),
+            "load": None,
+            "p2p": bool(e.get("portforward")) if provider == "protonvpn" else None,
+        })
+    if p2p_only and provider == "protonvpn":
+        p2p = [s for s in out if s["p2p"]]
+        if p2p:
+            out = p2p
+    out.sort(key=lambda s: str(s["name"]))
+    return out[:limit] if limit else out
+
+
+# --------------------------------------------------------------------------
+# NordVPN : API ouverte, sert a connaitre la charge
 # --------------------------------------------------------------------------
 def _nord_country_id(country):
-    data = _get_json("https://api.nordvpn.com/v1/servers/countries")
-    for c in data:
+    for c in _get_json("https://api.nordvpn.com/v1/servers/countries"):
         if c.get("name", "").lower() == country.lower():
             return c.get("id")
     return None
 
 
-def nord_servers(country, limit, p2p_only=True):
-    """Serveurs NordLynx recommandes (les moins charges) pour un pays."""
-    cid = _nord_country_id(country)
-    if cid is None:
-        return []
-    params = {
-        "filters[servers_technologies][identifier]": "wireguard_udp",
-        "filters[country_id]": str(cid),
-        "limit": str(max(limit * 4, 20)),
-    }
-    if p2p_only:
-        params["filters[servers_groups][identifier]"] = "legacy_p2p"
-    url = ("https://api.nordvpn.com/v1/servers/recommendations?"
-           + urllib.parse.urlencode(params))
-    data = _get_json(url)
-    servers = []
-    for s in data:
-        groups = [g.get("identifier") for g in s.get("groups", [])]
-        servers.append({
-            "provider": "nordvpn",
-            "name": s.get("name"),
-            "id": s.get("hostname"),
-            "ip": s.get("station"),
-            "country": country,
-            "city": _nord_city(s),
-            "load": s.get("load"),
-            "p2p": "legacy_p2p" in groups,
-        })
-    servers.sort(key=lambda x: (x["load"] if x["load"] is not None else 100))
-    return servers[:limit]
-
-
-def _nord_city(s):
-    for loc in s.get("locations", []):
-        c = (loc.get("country") or {}).get("city") or {}
-        if c.get("name"):
-            return c["name"]
-    return None
-
-
-# --------------------------------------------------------------------------
-# ProtonVPN
-# --------------------------------------------------------------------------
-PROTON_ENDPOINTS = (
-    "https://api.protonvpn.ch/vpn/logicals",
-    "https://api.protonmail.ch/vpn/logicals",
-    "https://api.protonvpn.ch/vpn/v1/logicals",
-)
-# l'API Proton rejette les requetes sans en-tetes applicatifs (HTTP 400)
-PROTON_HEADERS = {
-    "User-Agent": "ProtonVPN/4.0.0 (Linux; vpn-benchmark)",
-    "Accept": "application/vnd.protonmail.v1+json",
-    "x-pm-appversion": "LinuxVPN_4.0.0",
-    "x-pm-apiversion": "3",
-}
-
-
-def _proton_get():
-    last = None
-    for url in PROTON_ENDPOINTS:
-        try:
-            return _get_json(url, headers=PROTON_HEADERS)
-        except Exception as e:
-            last = "%s -> %s" % (url, e)
-    raise RuntimeError(last or "aucun endpoint Proton joignable")
-
-
-def proton_servers(country, limit, p2p_only=True):
-    """Serveurs logiques Proton payants du pays, tries par charge."""
-    iso = ISO.get(country, country[:2].upper())
-    data = _proton_get()
-    servers = []
-    for s in data.get("LogicalServers", []):
-        if s.get("ExitCountry") != iso:
-            continue
-        if s.get("Tier", 0) < 2:          # 0/1 = free/basic, 2 = Plus
-            continue
-        feats = int(s.get("Features", 0) or 0)
-        if feats & PROTON_FEATURE_TOR:
-            continue
-        is_p2p = bool(feats & PROTON_FEATURE_P2P)
-        if p2p_only and not is_p2p:
-            continue
-        if (s.get("Status", 1) or 0) != 1:
-            continue
-        phys = s.get("Servers") or [{}]
-        servers.append({
-            "provider": "protonvpn",
-            "name": s.get("Name"),
-            "id": s.get("Name"),
-            "ip": phys[0].get("EntryIP"),
-            "country": country,
-            "city": s.get("City"),
-            "load": s.get("Load"),
-            "p2p": is_p2p,
-        })
-    servers.sort(key=lambda x: (x["load"] if x["load"] is not None else 100))
-    return servers[:limit]
-
-
-# --------------------------------------------------------------------------
-def pick_servers(provider, country, limit, log=print):
-    """Retourne une liste de serveurs, ou un marqueur 'pays uniquement' si
-    l'API du provider est injoignable (gluetun choisira alors lui-meme)."""
+def nord_load_by_hostname(country, p2p_only=True):
+    """{hostname: charge} pour un pays. Best effort : {} si l'API ne repond pas."""
     try:
-        if provider == "nordvpn":
-            servers = nord_servers(country, limit)
-            if not servers:                       # aucun P2P dans ce pays
-                servers = nord_servers(country, limit, p2p_only=False)
-        elif provider == "protonvpn":
-            servers = proton_servers(country, limit)
-            if not servers:
-                servers = proton_servers(country, limit, p2p_only=False)
-        else:
-            servers = []
+        cid = _nord_country_id(country)
+        if cid is None:
+            return {}
+        params = {
+            "filters[servers_technologies][identifier]": "wireguard_udp",
+            "filters[country_id]": str(cid),
+            "limit": "200",
+        }
+        if p2p_only:
+            params["filters[servers_groups][identifier]"] = "legacy_p2p"
+        data = _get_json("https://api.nordvpn.com/v1/servers/recommendations?"
+                         + urllib.parse.urlencode(params))
+        return {s.get("hostname"): s.get("load") for s in data if s.get("hostname")}
+    except Exception:
+        return {}
+
+
+# --------------------------------------------------------------------------
+def pick_servers(provider, country, limit, log=print, catalog=None):
+    """Retourne une liste de serveurs a tester, ou un marqueur 'pays seul' si
+    aucune selection n'est possible (gluetun choisira alors lui-meme)."""
+    servers = []
+    try:
+        servers = catalog_servers(catalog, provider, country, None)
     except Exception as e:
-        log("selection serveurs %s/%s impossible (%s) -> gluetun choisira"
+        log("lecture du catalogue impossible pour %s/%s (%s)"
             % (provider, country, e))
-        servers = []
+
+    if servers and provider == "nordvpn":
+        # on garde l'ordre du catalogue mais on privilegie les serveurs les
+        # moins charges d'apres l'API Nord, quand elle repond
+        loads = nord_load_by_hostname(country)
+        if loads:
+            for s in servers:
+                s["load"] = loads.get(s["hostname"])
+            known = [s for s in servers if s["load"] is not None]
+            if known:
+                servers = sorted(known, key=lambda s: s["load"])
+
     if not servers:
         return [{"provider": provider, "name": "auto-%s" % country, "id": None,
-                 "ip": None, "country": country, "city": None, "load": None,
-                 "p2p": None}]
-    return servers
+                 "hostname": None, "ip": None, "country": country, "city": None,
+                 "load": None, "p2p": None}]
+    return servers[:limit]
 
 
 def gluetun_server_env(provider, server):
@@ -174,7 +152,7 @@ def gluetun_server_env(provider, server):
     if not server.get("id"):
         return env
     if provider == "nordvpn":
-        env["SERVER_HOSTNAMES"] = server["id"]
+        env["SERVER_HOSTNAMES"] = server.get("hostname") or server["id"]
     elif provider == "protonvpn":
         env["SERVER_NAMES"] = server["id"]
     return env
