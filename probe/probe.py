@@ -200,9 +200,15 @@ def cmd_pickdl(args):
             _one_download, args.streams, args.seconds, url)
         results.append({"url": url, "mbps": mbps,
                         "mb": round(total / 1e6, 1), "http": info})
-    results.sort(key=lambda r: -r["mbps"])
+    # Une cible qui limite le debit (429/403/503) sous-estime toutes les mesures
+    # de la campagne : elle passe derriere, meme si elle a paru la plus rapide.
+    for r in results:
+        r["throttled"] = any(code in str(r["http"])
+                             for code in ("429", "403", "503"))
+    results.sort(key=lambda r: (r["throttled"], -r["mbps"]))
+    clean = [r for r in results if not r["throttled"] and r["mbps"] > 0]
     return {"ok": bool(results and results[0]["mbps"] > 0),
-            "best": results[0]["url"] if results else None,
+            "best": (clean or results)[0]["url"] if results else None,
             "candidates": results}
 
 

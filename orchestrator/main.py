@@ -18,7 +18,7 @@ from . import providers as prov
 from . import report as rep
 from .config import Config, RESULTS_DIR
 from .db import DB
-from .dockerctl import Runner, VPNError
+from .dockerctl import Runner, VPNConfigError, VPNError
 from .p2p import P2PTester
 from .scoring import Scorer
 
@@ -70,6 +70,7 @@ class Bench:
         self.baseline_asn = None
         self.baseline_ip = None
         self.download_url = None
+        self._config_errors = set()
         self._catalog = None
         self._catalog_done = False
 
@@ -189,8 +190,9 @@ class Bench:
                    "--streams", str(self.cfg.m("throughput_streams", 8))],
             timeout=len(urls) * 40 + 60)
         for c in r.get("candidates", []):
-            log("  %-52s %8s Mb/s  http=%s"
-                % (c["url"][:52], c["mbps"], c["http"]))
+            log("  %-52s %8s Mb/s  http=%s%s"
+                % (c["url"][:52], c["mbps"], c["http"],
+                   "  (limitee, ecartee)" if c.get("throttled") else ""))
         best = r.get("best") or urls[0]
         log("cible retenue : %s" % best)
         self.db.log(self.run_id, None, "info", "cible de debit : %s" % best)
@@ -325,6 +327,7 @@ class Bench:
                     case["note"] = "repli : serveur non epingle"
                 break
             except VPNError as e:
+                fatal = isinstance(e, VPNConfigError)
                 failures.append("=== essai %d (%s) ===\n%s"
                                 % (attempt + 1,
                                    "serveur epingle" if pin else "pays seul", e))
@@ -332,6 +335,11 @@ class Bench:
                     % (attempt + 1, "epingle" if pin else "pays seul"))
                 for line in str(e).splitlines():
                     log("    | %s" % line)
+                if fatal:
+                    # une valeur d'environnement invalide ne se rattrape pas en
+                    # changeant de serveur : inutile de gaspiller un essai
+                    self._config_errors.add(provider)
+                    break
                 if pin and server.get("id"):
                     log("  nouvel essai sans epingler le serveur")
 
@@ -600,6 +608,14 @@ class Bench:
                     case_p2p = (do_p2p and country in p2p_countries
                                 and country not in done_p2p)
                     self.run_case(provider, server, rnd, case_p2p)
+                    if len(self._config_errors) >= 2:
+                        log("ARRET : gluetun refuse la configuration pour les "
+                            "deux providers. Corrige la variable signalee "
+                            "ci-dessus dans la stack Portainer, puis relance.")
+                        self.db.log(self.run_id, None, "error",
+                                    "campagne interrompue : configuration "
+                                    "gluetun invalide pour les deux providers")
+                        return
                     time.sleep(self.cfg.rt("between_cases_seconds", 5))
                     if case_p2p:
                         done_p2p.add(country)

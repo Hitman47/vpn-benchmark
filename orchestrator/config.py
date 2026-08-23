@@ -54,6 +54,7 @@ class Config:
         self.gluetun_image = os.environ.get("GLUETUN_IMAGE", "qmcgaw/gluetun:v3.40")
         self.lan_subnet = os.environ.get("LAN_SUBNET", "192.168.1.0/24")
         self.tz = os.environ.get("TZ", "UTC")
+        self.gluetun_log_level = self._gluetun_log_level()
         self.http_port = int(os.environ.get("BENCH_HTTP_PORT", "8888"))
         self.keep_alive = _env_bool("BENCH_KEEP_ALIVE")
         if self.keep_alive is None:
@@ -83,6 +84,25 @@ class Config:
                 "Renseigne NORD_WIREGUARD_PRIVATE_KEY et "
                 "PROTON_WIREGUARD_PRIVATE_KEY dans les variables "
                 "d'environnement de la stack Portainer." % ", ".join(missing))
+
+    # ------------------------------------------------------------------
+    GLUETUN_LOG_LEVELS = ("debug", "info", "warning", "error")
+
+    def _gluetun_log_level(self):
+        """Une valeur inconnue ici fait sortir gluetun en une seconde, donc
+        tous les tunnels de la campagne. On la refuse au lieu de la propager."""
+        v = (os.environ.get("BENCH_GLUETUN_LOG_LEVEL") or "").strip().lower()
+        if not v:
+            return "info"
+        if v == "warn":
+            return "warning"
+        if v in self.GLUETUN_LOG_LEVELS:
+            return v
+        print("ATTENTION : BENCH_GLUETUN_LOG_LEVEL=%r n'est pas un niveau de "
+              "log gluetun (attendu : %s). Valeur ignoree, 'info' utilise. "
+              "Le mode de campagne se choisit avec BENCH_MODE."
+              % (v, ", ".join(self.GLUETUN_LOG_LEVELS)))
+        return "info"
 
     # ------------------------------------------------------------------
     def _apply_env_overrides(self):

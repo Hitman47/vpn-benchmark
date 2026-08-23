@@ -56,8 +56,33 @@ def _unsupported_route(message):
     return m.group(1).strip() if m else None
 
 
+# Une variable d'environnement mal renseignee fait sortir gluetun en une
+# seconde, avec le vrai motif noye sous vingt lignes de banniere. On le remonte
+# en tete du diagnostic, et on ne perd pas de temps a reessayer : aucun repli
+# reseau ne corrigera une valeur invalide.
+CONFIG_ERROR_HINTS = (
+    "is not recognized", "not recognized", "cannot be parsed", "is not valid",
+    "must be one of", "invalid value", "unknown provider", "is not supported",
+)
+
+
+def _config_error(logs):
+    """Premiere erreur de configuration reperee dans les logs gluetun."""
+    for line in (logs or "").splitlines():
+        if "ERROR" not in line:
+            continue
+        if any(h in line.lower() for h in CONFIG_ERROR_HINTS):
+            tail = line.split("ERROR", 1)[1].strip()
+            return tail or line.strip()
+    return None
+
+
 class VPNError(RuntimeError):
     pass
+
+
+class VPNConfigError(VPNError):
+    """Gluetun refuse la configuration : reessayer est inutile."""
 
 
 class Runner:
@@ -194,37 +219,67 @@ class Runner:
         """Recupere servers.json depuis gluetun lui-meme.
 
         C'est la seule liste qui fasse autorite : gluetun refuse tout serveur
-        qui n'y figure pas, et l'API ProtonVPN exige desormais un token. On
-        demarre gluetun sans cle : il ecrit son catalogue puis s'arrete sur
-        l'erreur de configuration, et on extrait le fichier du conteneur.
+        qui n'y figure pas, et l'API ProtonVPN exige desormais un token.
+
+        Gluetun n'ecrit ce fichier qu'apres avoir valide sa configuration : on
+        le demarre donc avec les vraies cles, et on l'arrete des que le fichier
+        apparait, sans attendre que le tunnel soit monte.
         """
+        for provider in self.cfg.providers:
+            data = self._catalog_from(provider)
+            if data:
+                return data
+        self.log("catalogue gluetun indisponible : selection par pays uniquement")
+        return None
+
+    def _catalog_from(self, provider):
         name = "%s-catalog" % self.cfg.project
         try:
             self.client.containers.get(name).remove(force=True)
         except docker.errors.APIError:
             pass
+        pcfg = self.cfg.providers[provider]
+        env = {
+            "VPN_SERVICE_PROVIDER": pcfg["gluetun_provider"],
+            "VPN_TYPE": "wireguard",
+            "TZ": self.cfg.tz,
+            "LOG_LEVEL": self.cfg.gluetun_log_level,
+            "UPDATER_PERIOD": "0",
+            "FIREWALL": "off",
+            "HEALTH_SERVER_ADDRESS": "127.0.0.1:9999",
+        }
+        env.update(self.cfg.keys.get(provider) or {})
         container = None
         try:
             container = self.client.containers.run(
                 self.cfg.gluetun_image, name=name, detach=True,
-                environment={"VPN_SERVICE_PROVIDER": "nordvpn",
-                             "VPN_TYPE": "wireguard", "LOG_LEVEL": "info"},
-                network=self.network, labels={"vpnbench": "1"})
-            container.wait(timeout=90)   # sortie en erreur attendue : pas de cle
-            bits, _ = container.get_archive("/gluetun/servers.json")
-            buf = io.BytesIO(b"".join(bits))
-            with tarfile.open(fileobj=buf) as tar:
-                member = next(m for m in tar.getmembers() if m.isfile())
-                data = json.loads(tar.extractfile(member).read().decode("utf-8"))
+                cap_add=["NET_ADMIN"],
+                devices=["/dev/net/tun:/dev/net/tun:rwm"],
+                environment=env, network=self.network, labels={"vpnbench": "1"})
+            data = self._poll_catalog_file(container)
+            if data is None:
+                logs = ""
+                try:
+                    logs = container.logs().decode("utf-8", "replace")
+                except docker.errors.APIError:
+                    pass
+                bad = _config_error(logs)
+                if bad:
+                    self.log("CONFIGURATION REFUSEE PAR GLUETUN : %s" % bad)
+                    self.log("  -> corrige la variable d'environnement de la "
+                             "stack avant de relancer")
+                else:
+                    self.log("catalogue non ecrit par gluetun via %s" % provider)
+                return None
             counts = {k: len(v.get("servers") or [])
                       for k, v in data.items() if isinstance(v, dict)}
-            self.log("catalogue gluetun : %s"
-                     % ", ".join("%s=%d" % (k, n) for k, n in sorted(counts.items())
-                                 if n))
+            self.log("catalogue gluetun (via %s) : %s"
+                     % (provider,
+                        ", ".join("%s=%d" % (k, n)
+                                  for k, n in sorted(counts.items()) if n)))
             return data
         except Exception as e:
-            self.log("catalogue gluetun indisponible (%s) : selection par pays "
-                     "uniquement" % e)
+            self.log("catalogue illisible via %s (%s)" % (provider, e))
             return None
         finally:
             if container is not None:
@@ -232,6 +287,31 @@ class Runner:
                     container.remove(force=True)
                 except docker.errors.APIError:
                     pass
+
+    def _poll_catalog_file(self, container, timeout=60):
+        """Attend l'apparition de /gluetun/servers.json, sans attendre le
+        tunnel : le fichier est ecrit bien avant que la connexion aboutisse."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                bits, _ = container.get_archive("/gluetun/servers.json")
+                buf = io.BytesIO(b"".join(bits))
+                with tarfile.open(fileobj=buf) as tar:
+                    member = next(m for m in tar.getmembers() if m.isfile())
+                    raw = tar.extractfile(member).read().decode("utf-8")
+                if raw.strip():
+                    return json.loads(raw)
+            except (docker.errors.NotFound, docker.errors.APIError,
+                    tarfile.TarError, ValueError, StopIteration):
+                pass
+            try:
+                container.reload()
+                if container.status not in ("running", "created"):
+                    return None      # sorti sans avoir ecrit : inutile d'attendre
+            except docker.errors.APIError:
+                return None
+            time.sleep(1)
+        return None
 
     # ------------------------------------------------------------------
     def cleanup(self, prefix=None):
@@ -293,7 +373,7 @@ class Runner:
             "FIREWALL_INPUT_PORTS": "8000,8080",
             "HTTP_CONTROL_SERVER_ADDRESS": ":%d" % CONTROL_PORT,
             "HEALTH_TARGET_ADDRESS": "1.1.1.1:443",
-            "LOG_LEVEL": os.environ.get("BENCH_GLUETUN_LOG_LEVEL", "info"),
+            "LOG_LEVEL": self.cfg.gluetun_log_level,
             "UPDATER_PERIOD": "0",
         }
         env.update(self.cfg.keys[provider])
@@ -357,6 +437,11 @@ class Runner:
         except docker.errors.APIError as e:
             logs = "(logs illisibles : %s)" % e
         logs = logs.strip()
+        bad = _config_error(logs)
+        if bad:
+            parts.insert(1, "CONFIGURATION REFUSEE PAR GLUETUN : %s" % bad)
+            parts.insert(2, "  -> corrige la variable d'environnement de la "
+                            "stack, aucun repli ne peut compenser")
         parts.append("--- logs gluetun ---")
         parts.append(logs if logs else "(le conteneur n'a rien ecrit)")
         return "\n".join(parts)
@@ -368,8 +453,11 @@ class Runner:
         while time.time() - t0 < timeout:
             container.reload()
             if container.status not in ("running", "created"):
-                raise VPNError(self.diagnose(
-                    container, "gluetun s'est arrete avant d'etablir le tunnel"))
+                text = self.diagnose(
+                    container, "gluetun s'est arrete avant d'etablir le tunnel")
+                if _config_error(text):
+                    raise VPNConfigError(text)
+                raise VPNError(text)
             try:
                 r = requests.get(self.control_url(container, "/v1/publicip/ip"),
                                  timeout=4)

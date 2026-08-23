@@ -140,6 +140,22 @@ options : **coche P2P et NAT-PMP**, sinon le port forwarding ne sera pas testé.
 Si malgré tout un pays ne répond que chez un seul provider, le banc l'exclut du
 score plutôt que de comparer deux pays différents (voir §5).
 
+### Quand gluetun refuse la configuration
+
+Une valeur d'environnement invalide fait sortir gluetun en une seconde, et donc
+échouer *tous* les cas. Le motif réel est maintenant remonté en tête du
+diagnostic plutôt que noyé sous la bannière :
+
+```
+CONFIGURATION REFUSEE PAR GLUETUN : log level: level is not recognized: multi
+  -> corrige la variable d'environnement de la stack, aucun repli ne peut compenser
+```
+
+Dans ce cas le banc ne perd plus de temps en second essai — aucun changement de
+serveur ne corrige une valeur invalide — et si les **deux** providers échouent
+pour ce motif, la campagne s'arrête immédiatement au lieu de dérouler la matrice
+à vide.
+
 ### Quand un tunnel refuse de monter
 
 Chaque échec de connexion est écrit en entier dans `results/failures/`, donc
@@ -194,7 +210,7 @@ donc rien d'autre à remplir pour démarrer.
 | `TZ` | `Europe/Paris` | fuseau horaire des logs et du rapport |
 | `PROTON_WIREGUARD_ADDRESSES` | `10.2.0.2/32` | adresse fournie avec la config Proton |
 | `GLUETUN_IMAGE` | `qmcgaw/gluetun:v3.40` | version de gluetun évaluée |
-| `BENCH_GLUETUN_LOG_LEVEL` | `info` | `debug` pour diagnostiquer un tunnel qui ne monte pas |
+| `BENCH_GLUETUN_LOG_LEVEL` | `info` | niveau de log de gluetun : `debug`, `info`, `warning`, `error` **et rien d'autre** — une valeur inconnue faisait mourir tous les tunnels, elle est désormais refusée et ignorée. Le mode de campagne, lui, se choisit avec `BENCH_MODE` |
 | `BENCH_IMAGE` | image GHCR | pour épingler un tag précis, ex. `…:sha-c8e7851` |
 | `BENCH_WEB_PORT` | `8888` | port du rapport **côté NAS** (mapping du compose) |
 
