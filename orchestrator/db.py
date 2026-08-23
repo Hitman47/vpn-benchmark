@@ -103,13 +103,18 @@ class DB:
         self.conn.commit()
 
     # --- lecture --------------------------------------------------------
-    def metric_values(self, provider, metric, run_id=None):
+    def metric_values(self, provider, metric, run_id=None, countries=None):
         q = ("SELECT m.value FROM metrics m JOIN cases c ON c.case_id=m.case_id"
              " WHERE c.provider=? AND m.metric=?")
         p = [provider, metric]
         if run_id:
             q += " AND c.run_id=?"
             p.append(run_id)
+        if countries is not None:
+            if not countries:
+                return []
+            q += " AND c.country IN (%s)" % ",".join("?" * len(countries))
+            p.extend(countries)
         return [r[0] for r in self.conn.execute(q, p)]
 
     def metric_series(self, provider, metric, run_id=None):

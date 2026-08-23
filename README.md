@@ -80,6 +80,27 @@ config gluetun prête à l'emploi du provider gagnant.
 
 Le résumé comparatif est aussi imprimé dans les **logs du conteneur**, en clair.
 
+### Vérifier d'abord que les deux clés couvrent les mêmes pays
+
+```
+BENCH_MODE=preflight
+```
+
+~2 min, aucune mesure : le banc tente une connexion par provider et par pays,
+affiche l'IP de sortie obtenue et conclut par la liste des **pays comparables**
+— ceux où les deux providers répondent. Résultat conservé dans
+`http://<ip-du-nas>:8888/preflight.txt`.
+
+À propos de ProtonVPN : la clé privée WireGuard est liée à **ton compte**, pas à
+un serveur. Le fichier téléchargé depuis le portail contient l'`Endpoint` et la
+`PublicKey` d'un serveur précis, mais gluetun remplace ces deux lignes par
+celles du serveur qu'il choisit — c'est ce qui lui permet de couvrir tout le
+parc avec une seule clé. Ce qui est bien figé à la génération, ce sont les
+options : **coche P2P et NAT-PMP**, sinon le port forwarding ne sera pas testé.
+
+Si malgré tout un pays ne répond que chez un seul provider, le banc l'exclut du
+score plutôt que de comparer deux pays différents (voir §5).
+
 ### Quand un tunnel refuse de monter
 
 Chaque échec de connexion est écrit en entier dans `results/failures/`, donc
@@ -102,6 +123,7 @@ lui-même un conteneur `vpnbench-vpn` pour chaque serveur testé.
 
 | Étape | Action dans Portainer |
 |---|---|
+| Vérifier les clés ~2 min | `BENCH_MODE=preflight` → Deploy |
 | Validation ~20 min | `BENCH_MODE=smoke` → Deploy |
 | Campagne ~24 h | `BENCH_MODE=full` → Update the stack (re-deploy) |
 | Repondérer le verdict sans remesurer | `BENCH_MODE=report` → Update the stack |
@@ -140,7 +162,7 @@ donc rien d'autre à remplir pour démarrer.
 
 | Variable | Défaut smoke / full | Effet |
 |---|---|---|
-| `BENCH_MODE` | `smoke` | `smoke` / `full` / `report` |
+| `BENCH_MODE` | `smoke` | `preflight` / `smoke` / `full` / `report` |
 | `BENCH_COUNTRIES` | `Netherlands` / `Netherlands,Switzerland,Sweden` | pays de sortie testés |
 | `BENCH_ROUNDS` | `1` / `24` | nombre de passes |
 | `BENCH_INTERVAL_MINUTES` | `0` / `60` | espacement entre deux débuts de passe |
@@ -241,6 +263,10 @@ le facteur limitant, pas le VPN.
 4. **Médianes, pas moyennes** : un pic de congestion ne fausse pas le résultat.
 5. **Serveurs choisis par API** (charge la plus faible, groupe P2P) et épinglés
    par nom, donc le même serveur est retesté round après round.
+6. **Seuls les pays comparables comptent** : un pays où un seul des deux
+   providers a réussi à se connecter est exclu du score, et signalé comme tel
+   dans le rapport. Comparer NordVPN aux Pays-Bas à ProtonVPN en France
+   mesurerait la distance, pas le fournisseur.
 
 Le score est une somme pondérée de métriques normalisées : sur chaque métrique
 le meilleur vaut 1,0 et l'autre une fraction proportionnelle. Modifie les poids

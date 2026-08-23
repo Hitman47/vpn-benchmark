@@ -76,6 +76,11 @@ def print_summary(agg, scores, overhead, verdict, log=print):
                 % (PROVIDER_LABELS.get(p, p),
                    fmt(o.get("down_retention_pct")), fmt(o.get("latency_added_ms"))))
     log("=" * (width + 20 * len(providers)))
+    if verdict.get("countries"):
+        log("Pays retenus pour le score : %s" % ", ".join(verdict["countries"]))
+    if verdict.get("excluded_countries"):
+        log("Pays EXCLUS (un provider n'y a pas repondu) : %s"
+            % ", ".join(verdict["excluded_countries"]))
     if verdict.get("winner"):
         log("VERDICT : %s (ecart %s pts, confiance %s)"
             % (PROVIDER_LABELS.get(verdict["winner"], verdict["winner"]),
@@ -213,6 +218,15 @@ def build_html(db, cfg, agg, scores, overhead, verdict, run_id):
         if verdict.get("top_reasons"):
             h.append('<div class="note">Domine sur : %s</div>'
                      % html.escape(", ".join(verdict["top_reasons"])))
+        h.append('</div>')
+    if verdict.get("countries") or verdict.get("excluded_countries"):
+        h.append('<div class="card"><div class="k">Perimetre de comparaison</div>'
+                 '<div class="note">Pays retenus : <b>%s</b></div>'
+                 % html.escape(", ".join(verdict.get("countries") or ["aucun"])))
+        if verdict.get("excluded_countries"):
+            h.append('<div class="note">Exclus car un seul provider y a repondu, '
+                     'les comparer serait trompeur : <b>%s</b></div>'
+                     % html.escape(", ".join(verdict["excluded_countries"])))
         h.append('</div>')
 
     # --- cartes score

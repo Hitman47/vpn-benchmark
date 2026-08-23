@@ -25,7 +25,7 @@ services:
       GLUETUN_IMAGE: ${GLUETUN_IMAGE:-qmcgaw/gluetun:v3.40}
       BENCH_GLUETUN_LOG_LEVEL: ${BENCH_GLUETUN_LOG_LEVEL:-info}  # debug si un tunnel refuse de monter
       # --- campagne ---------------------------------------------------------
-      BENCH_MODE: ${BENCH_MODE:-smoke}          # smoke | full | report
+      BENCH_MODE: ${BENCH_MODE:-smoke}          # preflight | smoke | full | report
       BENCH_COUNTRIES: ${BENCH_COUNTRIES:-}     # ex: Netherlands,Switzerland,Sweden
       BENCH_ROUNDS: ${BENCH_ROUNDS:-}
       BENCH_INTERVAL_MINUTES: ${BENCH_INTERVAL_MINUTES:-}

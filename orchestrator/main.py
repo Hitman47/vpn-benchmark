@@ -72,6 +72,98 @@ class Bench:
         self.download_url = None
 
     # ------------------------------------------------------------------
+    def preflight(self):
+        """Tente une connexion par provider et par pays, sans rien mesurer.
+        Repond a la question : mes deux cles fonctionnent-elles sur les pays
+        que je veux comparer ?"""
+        rows = []
+        for provider in self.cfg.providers:
+            for country in self.cfg.m("countries", ["Netherlands"]):
+                log("%s / %s" % (provider, country))
+                servers = prov.pick_servers(provider, country, 1, log)
+                server = servers[0]
+                vpn = None
+                row = {"provider": provider, "country": country,
+                       "server": server["name"], "ok": False, "detail": ""}
+                try:
+                    vpn, seconds, ipinfo = self.runner.start_vpn(
+                        provider, server, pin_server=False)
+                    ident = self.runner.probe(vpn, ["ident"])
+                    row.update({
+                        "ok": True,
+                        "seconds": seconds,
+                        "ip": ident.get("ip") or ipinfo.get("public_ip"),
+                        "exit_country": ident.get("country") or ipinfo.get("country"),
+                        "org": ident.get("org"),
+                    })
+                    log("  OK en %ss : %s (%s, %s)"
+                        % (seconds, row["ip"], row["exit_country"], row["org"]))
+                except VPNError as e:
+                    row["detail"] = str(e).splitlines()[0]
+                    dernier = [l for l in str(e).splitlines() if "ERROR" in l]
+                    if dernier:
+                        row["detail"] = dernier[-1][:300]
+                    log("  ECHEC : %s" % row["detail"])
+                    self._dump_failure("preflight-%s-%s" % (provider, country),
+                                       str(e))
+                finally:
+                    if vpn is not None:
+                        try:
+                            vpn.remove(force=True)
+                        except Exception:
+                            pass
+                rows.append(row)
+                time.sleep(2)
+        self._preflight_report(rows)
+        return rows
+
+    def _preflight_report(self, rows):
+        countries = []
+        for r in rows:
+            if r["country"] not in countries:
+                countries.append(r["country"])
+        providers = list(self.cfg.providers)
+        lines = ["", "=" * 78,
+                 "VERIFICATION DES CLES : quels pays sont utilisables ?", "=" * 78,
+                 "%-16s%s" % ("PAYS", "".join(p[:14].ljust(16) for p in providers))]
+        for country in countries:
+            cells = ""
+            for p in providers:
+                r = next((x for x in rows
+                          if x["provider"] == p and x["country"] == country), None)
+                cells += (("OK %s" % (r.get("exit_country") or "")) if r and r["ok"]
+                          else "ECHEC").ljust(16)
+            lines.append("%-16s%s" % (country[:15], cells))
+        lines.append("-" * 78)
+
+        usable = [c for c in countries
+                  if all(any(x["ok"] for x in rows
+                             if x["provider"] == p and x["country"] == c)
+                         for p in providers)]
+        if usable:
+            lines.append("Pays comparables (les deux providers repondent) : %s"
+                         % ", ".join(usable))
+            lines.append("Mets BENCH_COUNTRIES=%s puis lance BENCH_MODE=smoke"
+                         % ",".join(usable))
+        else:
+            lines.append("Aucun pays commun : verifie les cles et les fichiers "
+                         "de /failures/")
+        broken = [(r["provider"], r["country"], r["detail"])
+                  for r in rows if not r["ok"]]
+        for p, c, d in broken:
+            lines.append("  echec %-10s %-14s %s" % (p, c, d[:120]))
+        lines.append("=" * 78)
+        for line in lines:
+            log(line)
+        try:
+            path = os.path.join(RESULTS_DIR, "preflight.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            log("resultat conserve : /preflight.txt")
+        except OSError:
+            pass
+
+    # ------------------------------------------------------------------
     def pick_download_target(self):
         """Choisit une fois pour toutes la cible de debit descendant : tous les
         cas doivent partager la meme, sinon la comparaison n'a aucun sens."""
@@ -444,6 +536,20 @@ def main():
     cfg.check_keys()
     serve_results(cfg.http_port)
     log(cfg.summary())
+
+    if mode == "preflight":
+        db = DB(DB_PATH)
+        run_id = "preflight-%s" % datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        db.start_run(run_id, mode, cfg.raw)
+        bench = Bench(cfg, db, run_id)
+        bench.runner.cleanup()
+        try:
+            bench.preflight()
+        finally:
+            bench.runner.cleanup()
+            db.finish_run(run_id)
+        idle(cfg)
+        return
 
     db = DB(DB_PATH)
     run_id = "%s-%s" % (mode, datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))

@@ -29,6 +29,23 @@ modes:
     p2p_minutes: 3
     killswitch_test: true
 
+  # Verification rapide : tente une connexion par provider et par pays, et
+  # affiche l'IP de sortie obtenue. Aucune mesure, ~2 min. A lancer en premier
+  # pour valider que les deux cles fonctionnent sur les pays vises.
+  preflight:
+    rounds: 1
+    interval_seconds: 0
+    countries: [Netherlands, Switzerland, Sweden, France]
+    servers_per_country: 1
+    include_baseline: false
+    latency_count: 5
+    throughput_seconds: 3
+    throughput_streams: 4
+    web_repeats: 1
+    p2p_every_rounds: 0
+    p2p_minutes: 0
+    killswitch_test: false
+
   full:
     rounds: 24                    # 24 rounds x 1h = ~24h
     interval_seconds: 3600        # temps minimum entre 2 debuts de round

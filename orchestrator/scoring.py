@@ -23,12 +23,36 @@ class Scorer:
         self.hib = cfg.scoring["higher_is_better"]
 
     # ------------------------------------------------------------------
+    def comparable_countries(self):
+        """Pays ou CHAQUE provider VPN a au moins un cas reussi. Comparer un
+        provider mesure aux Pays-Bas a un autre mesure en France n'aurait
+        aucun sens : ces pays-la sont exclus du score."""
+        cases = self.db.cases(self.run_id)
+        vpns = sorted({c["provider"] for c in cases if c["provider"] != "baseline"})
+        if not vpns:
+            return [], []
+        per_provider = [
+            {c["country"] for c in cases if c["provider"] == p and c["ok"]}
+            for p in vpns
+        ]
+        common = set.intersection(*per_provider) if per_provider else set()
+        seen = []
+        for c in cases:
+            if c["provider"] != "baseline" and c["country"] not in seen:
+                seen.append(c["country"])
+        return ([c for c in seen if c in common],
+                [c for c in seen if c not in common])
+
     def aggregate(self):
         """Mediane de chaque metrique par provider (baseline incluse)."""
         agg = {}
+        keep, excluded = self.comparable_countries()
+        self.kept_countries, self.excluded_countries = keep, excluded
         for provider in self.db.providers_seen(self.run_id):
+            countries = None if provider == "baseline" else keep
             cases = [c for c in self.db.cases(self.run_id)
-                     if c["provider"] == provider]
+                     if c["provider"] == provider
+                     and (countries is None or c["country"] in countries)]
             row = {}
             for metric in self.weights:
                 if metric == "success_rate_pct":
@@ -36,15 +60,16 @@ class Scorer:
                                          / len(cases), 1) if cases else None)
                     continue
                 row[metric] = median(
-                    self.db.metric_values(provider, metric, self.run_id))
+                    self.db.metric_values(provider, metric, self.run_id, countries))
             # metriques de contexte, hors score
             for metric in ("throughput_down_mbps", "latency_avg_ms",
                            "p2p_down_mbps", "cpu_max_pct", "path_mtu",
                            "web_total_ms", "throughput_up_mbps"):
                 row.setdefault(metric, median(
-                    self.db.metric_values(provider, metric, self.run_id)))
+                    self.db.metric_values(provider, metric, self.run_id, countries)))
             row["_p95_latency_ms"] = p95(
-                self.db.metric_values(provider, "latency_avg_ms", self.run_id))
+                self.db.metric_values(provider, "latency_avg_ms", self.run_id,
+                                      countries))
             row["_n_cases"] = len(cases)
             row["_n_ok"] = sum(1 for c in cases if c["ok"])
             agg[provider] = row
@@ -132,6 +157,8 @@ class Scorer:
             return {"winner": None, "reason": "aucune donnee"}
         if not any((agg[p].get("_n_ok") or 0) > 0 for p in vpns):
             return {"winner": None, "ranking": vpns, "confidence": "nulle",
+                    "countries": getattr(self, "kept_countries", []),
+                    "excluded_countries": getattr(self, "excluded_countries", []),
                     "reason": "aucun tunnel n'a pu etre etabli : rien a comparer. "
                               "Voir les fichiers de /failures/ et la section "
                               "Incidents du rapport."}
@@ -159,4 +186,6 @@ class Scorer:
             confidence = "moyenne"
         return {"winner": winner, "gap": round(gap, 1),
                 "confidence": confidence, "top_reasons": reasons,
-                "ranking": vpns}
+                "ranking": vpns,
+                "countries": getattr(self, "kept_countries", []),
+                "excluded_countries": getattr(self, "excluded_countries", [])}
