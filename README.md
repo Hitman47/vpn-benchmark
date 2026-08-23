@@ -175,6 +175,7 @@ donc rien d'autre à remplir pour démarrer.
 |---|---|---|
 | `BENCH_P2P_ENABLED` | `true` | active le test torrent réel |
 | `BENCH_P2P_MINUTES` | `3` / `8` | durée d'un test torrent |
+| `BENCH_PF_AB` | `true` | rejoue le test torrent **sans** port forwarding sur le même serveur ProtonVPN, pour isoler l'apport du NAT-PMP (double la durée P2P) |
 | `BENCH_P2P_EVERY_ROUNDS` | `1` / `4` | fréquence du test torrent |
 | `BENCH_MAX_DOWNLOAD_GB` | `4` | garde-fou sur le volume téléchargé |
 
@@ -239,8 +240,18 @@ Ubuntu), swarm réel : débit, seeds vus, délai avant le premier peer, et surto
 **peers entrants**.
 
 **Port forwarding** — NAT-PMP demandé via gluetun, puis vérification que le port
-est *réellement* joignable depuis l'extérieur. Proton en dispose, Nord non :
-c'est généralement le facteur qui décide pour un usage torrent.
+est *réellement* joignable depuis l'extérieur, une fois qBittorrent en écoute.
+Proton en dispose, Nord non : c'est généralement le facteur qui décide pour un
+usage torrent.
+
+**Intérêt du port forwarding (test A/B)** — le port forwarding est aussi testé
+*contre lui-même*. Juste après le cas ProtonVPN normal, le même serveur est
+rouvert avec `VPN_PORT_FORWARDING=off` et le même torrent est rejoué. Comparer
+Proton-avec-PF à Nord-sans-PF mesurerait deux opérateurs à la fois ; comparer
+Proton-avec-PF à Proton-sans-PF isole la redirection de port et elle seule. Le
+rapport en tire une section dédiée : peers entrants, débit descendant et
+montant, délai avant le premier peer, avec et sans. Désactivable par
+`BENCH_PF_AB=false`.
 
 **Sécurité** — fuite IPv6, fuite DNS (ASN du résolveur comparé à celui de ta
 connexion nue), IP de sortie identique à l'IP nue, MTU du chemin, et kill-switch
@@ -263,7 +274,10 @@ le facteur limitant, pas le VPN.
 4. **Médianes, pas moyennes** : un pic de congestion ne fausse pas le résultat.
 5. **Serveurs choisis par API** (charge la plus faible, groupe P2P) et épinglés
    par nom, donc le même serveur est retesté round après round.
-6. **Seuls les pays comparables comptent** : un pays où un seul des deux
+6. **Le port forwarding est isolé** : son apport se mesure à provider et
+   serveur constants (bras témoin NAT-PMP coupé, joué dans la foulée), jamais
+   en comparant deux fournisseurs.
+7. **Seuls les pays comparables comptent** : un pays où un seul des deux
    providers a réussi à se connecter est exclu du score, et signalé comme tel
    dans le rapport. Comparer NordVPN aux Pays-Bas à ProtonVPN en France
    mesurerait la distance, pas le fournisseur.

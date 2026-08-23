@@ -93,6 +93,10 @@ p2p:
     - https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso.torrent
   # Coupe le telechargement au-dela de ce volume (Go) pour ne pas exploser le quota
   max_download_gb: 4
+  # Test A/B du port forwarding : rejoue le meme torrent, sur le meme serveur,
+  # NAT-PMP coupe. Seuls les providers qui ont port_forwarding: true sont
+  # concernes (ProtonVPN). Double la duree du test P2P.
+  port_forward_ab: true
   qbittorrent_image: linuxserver/qbittorrent:latest
 
 # --- Ponderation du score final (total libre, normalise ensuite)
@@ -108,6 +112,7 @@ scoring:
     connect_seconds: 4
     success_rate_pct: 10
     p2p_down_mbps: 10
+    p2p_up_mbps: 4
     p2p_incoming_peers: 5
     port_forward_ok: 8
     leak_count: 12
@@ -123,6 +128,7 @@ scoring:
     connect_seconds: false
     success_rate_pct: true
     p2p_down_mbps: true
+    p2p_up_mbps: true
     p2p_incoming_peers: true
     port_forward_ok: true
     leak_count: false

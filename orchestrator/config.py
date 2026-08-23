@@ -127,6 +127,9 @@ class Config:
         b = _env_bool("BENCH_P2P_ENABLED")
         if b is not None:
             self.p2p["enabled"] = b
+        b = _env_bool("BENCH_PF_AB")
+        if b is not None:
+            self.p2p["port_forward_ab"] = b
         b = _env_bool("BENCH_KILLSWITCH")
         if b is not None:
             m["killswitch_test"] = b
@@ -143,9 +146,10 @@ class Config:
 
     def summary(self):
         return ("mode=%s rounds=%s intervalle=%smin pays=%s serveurs/pays=%s "
-                "p2p=%s (%s min, 1 round/%s)"
+                "p2p=%s (%s min, 1 round/%s, temoin sans PF=%s)"
                 % (self.mode_name, self.m("rounds"),
                    round((self.m("interval_seconds") or 0) / 60),
                    ",".join(self.m("countries", [])),
                    self.m("servers_per_country"), self.p2p.get("enabled"),
-                   self.m("p2p_minutes"), self.m("p2p_every_rounds")))
+                   self.m("p2p_minutes"), self.m("p2p_every_rounds"),
+                   self.p2p.get("port_forward_ab", True)))

@@ -151,6 +151,78 @@ class Scorer:
         return res
 
     # ------------------------------------------------------------------
+    PF_AB_METRICS = ("p2p_down_mbps", "p2p_up_mbps", "p2p_incoming_peers",
+                     "p2p_connected_peers", "p2p_first_peer_s",
+                     "p2p_downloaded_mb", "port_forward_ok")
+
+    def port_forward_ab(self):
+        """Ce que le port forwarding apporte, provider par provider.
+
+        Compare deux bras du MEME provider sur le meme serveur : NAT-PMP actif
+        (variante 'base') contre NAT-PMP coupe (variante 'nopf'). C'est la
+        seule facon d'attribuer l'ecart au port forwarding lui-meme plutot
+        qu'aux differences entre deux reseaux."""
+        out = {}
+        for provider, pcfg in self.cfg.providers.items():
+            if not pcfg.get("port_forwarding"):
+                continue
+            witness = self.db.cases(self.run_id, variant="nopf")
+            witness = [c for c in witness if c["provider"] == provider]
+            if not witness:
+                continue
+            row = {"n_cases_nopf": len(witness),
+                   "n_ok_nopf": sum(1 for c in witness if c["ok"]),
+                   "metrics": {}}
+            for metric in self.PF_AB_METRICS:
+                with_pf = median(self.db.metric_values(
+                    provider, metric, self.run_id, variant="base"))
+                without = median(self.db.metric_values(
+                    provider, metric, self.run_id, variant="nopf"))
+                if with_pf is None and without is None:
+                    continue
+                delta = pct = None
+                if with_pf is not None and without is not None:
+                    delta = round(with_pf - without, 3)
+                    if without > 0:
+                        pct = round(100.0 * (with_pf - without) / without, 1)
+                    elif with_pf > 0:
+                        pct = float("inf")
+                row["metrics"][metric] = {"with_pf": with_pf, "without_pf": without,
+                                          "delta": delta, "delta_pct": pct}
+            row["conclusion"] = self._pf_conclusion(row["metrics"])
+            out[provider] = row
+        return out
+
+    @staticmethod
+    def _pf_conclusion(m):
+        """Phrase de synthese, prudente : on ne conclut que si le bras temoin a
+        vraiment tourne et que l'ecart depasse le bruit du swarm."""
+        pf = (m.get("port_forward_ok") or {})
+        if pf.get("with_pf") is not None and not pf["with_pf"]:
+            return ("le port n'a jamais ete joignable de l'exterieur meme avec "
+                    "NAT-PMP actif : la redirection n'a pas fonctionne, l'ecart "
+                    "mesure ne prouve rien")
+        inc = (m.get("p2p_incoming_peers") or {})
+        down = (m.get("p2p_down_mbps") or {})
+        up = (m.get("p2p_up_mbps") or {})
+        if inc.get("with_pf") is None or inc.get("without_pf") is None:
+            return "bras temoin incomplet : pas de conclusion"
+        gain_peers = inc.get("delta") or 0
+        gain_down = down.get("delta_pct")
+        gain_up = up.get("delta_pct")
+        bits = []
+        if gain_peers > 0.5:
+            bits.append("%+.1f peers entrants" % gain_peers)
+        if gain_down is not None and abs(gain_down) >= 10:
+            bits.append("%+.0f%% de debit descendant" % gain_down)
+        if gain_up is not None and abs(gain_up) >= 10:
+            bits.append("%+.0f%% de debit montant" % gain_up)
+        if not bits:
+            return ("aucun ecart significatif : sur ce torrent et cette duree, "
+                    "le port forwarding n'a rien change de mesurable")
+        return "avec le port forwarding : " + ", ".join(bits)
+
+    # ------------------------------------------------------------------
     def verdict(self, scores, agg):
         vpns = sorted(scores, key=lambda p: scores[p]["score"], reverse=True)
         if not vpns:

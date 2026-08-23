@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS cases (
     run_id     TEXT,
     round      INTEGER,
     provider   TEXT,          -- nordvpn | protonvpn | baseline
+    variant    TEXT,          -- base | nopf (bras A/B du port forwarding)
     country    TEXT,
     server     TEXT,
     started_at REAL,
@@ -60,7 +61,17 @@ class DB:
         self.conn = sqlite3.connect(path, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self):
+        """Ajoute les colonnes apparues apres coup, sans casser une base
+        existante (le volume results est conserve entre deux campagnes)."""
+        have = {r[1] for r in self.conn.execute("PRAGMA table_info(cases)")}
+        for col, decl in (("variant", "TEXT"),):
+            if col not in have:
+                self.conn.execute("ALTER TABLE cases ADD COLUMN %s %s"
+                                  % (col, decl))
 
     # --- ecriture -------------------------------------------------------
     def start_run(self, run_id, mode, config):
@@ -76,9 +87,11 @@ class DB:
         self.conn.commit()
 
     def add_case(self, case):
-        cols = ("case_id", "run_id", "round", "provider", "country", "server",
-                "started_at", "ok", "exit_ip", "exit_asn", "exit_org",
+        cols = ("case_id", "run_id", "round", "provider", "variant", "country",
+                "server", "started_at", "ok", "exit_ip", "exit_asn", "exit_org",
                 "exit_country", "note")
+        case = dict(case)
+        case.setdefault("variant", "base")
         self.conn.execute(
             "INSERT OR REPLACE INTO cases(%s) VALUES (%s)"
             % (",".join(cols), ",".join("?" * len(cols))),
@@ -103,10 +116,16 @@ class DB:
         self.conn.commit()
 
     # --- lecture --------------------------------------------------------
-    def metric_values(self, provider, metric, run_id=None, countries=None):
+    def metric_values(self, provider, metric, run_id=None, countries=None,
+                      variant="base"):
+        """variant=None pour ne pas filtrer, sinon 'base' (bras principal) ou
+        'nopf' (meme provider, port forwarding coupe)."""
         q = ("SELECT m.value FROM metrics m JOIN cases c ON c.case_id=m.case_id"
              " WHERE c.provider=? AND m.metric=?")
         p = [provider, metric]
+        if variant is not None:
+            q += " AND COALESCE(c.variant,'base')=?"
+            p.append(variant)
         if run_id:
             q += " AND c.run_id=?"
             p.append(run_id)
@@ -129,18 +148,21 @@ class DB:
         return [dict(r) for r in self.conn.execute(q, p)]
 
     def providers_seen(self, run_id=None):
-        q = "SELECT DISTINCT provider FROM cases"
+        q = "SELECT DISTINCT provider FROM cases WHERE COALESCE(variant,'base')='base'"
         p = []
         if run_id:
-            q += " WHERE run_id=?"
+            q += " AND run_id=?"
             p.append(run_id)
         return [r[0] for r in self.conn.execute(q, p)]
 
-    def cases(self, run_id=None):
-        q = "SELECT * FROM cases"
+    def cases(self, run_id=None, variant="base"):
+        q = "SELECT * FROM cases WHERE 1=1"
         p = []
+        if variant is not None:
+            q += " AND COALESCE(variant,'base')=?"
+            p.append(variant)
         if run_id:
-            q += " WHERE run_id=?"
+            q += " AND run_id=?"
             p.append(run_id)
         q += " ORDER BY started_at"
         return [dict(r) for r in self.conn.execute(q, p)]
@@ -167,7 +189,8 @@ class DB:
         os.makedirs(directory, exist_ok=True)
         paths = []
         rows = self.conn.execute(
-            "SELECT c.run_id, c.round, c.provider, c.country, c.server,"
+            "SELECT c.run_id, c.round, c.provider,"
+            " COALESCE(c.variant,'base') AS variant, c.country, c.server,"
             " c.exit_ip, c.exit_org, c.exit_country, c.ok,"
             " m.ts, m.metric, m.value, m.unit"
             " FROM metrics m JOIN cases c ON c.case_id=m.case_id"
@@ -175,7 +198,7 @@ class DB:
         p = os.path.join(directory, "measurements.csv")
         with open(p, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["run_id", "round", "provider", "country", "server",
+            w.writerow(["run_id", "round", "provider", "variant", "country", "server",
                         "exit_ip", "exit_org", "exit_country", "case_ok",
                         "ts", "metric", "value", "unit"])
             for r in rows:
@@ -183,7 +206,7 @@ class DB:
         paths.append(p)
 
         p = os.path.join(directory, "cases.csv")
-        cs = self.cases()
+        cs = self.cases(variant=None)
         with open(p, "w", newline="", encoding="utf-8") as f:
             if cs:
                 w = csv.DictWriter(f, fieldnames=list(cs[0].keys()))

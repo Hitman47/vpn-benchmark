@@ -12,6 +12,8 @@ import time
 import docker
 import requests
 
+DEFAULT_BT_PORT = 6881   # port sans redirection : le bras temoin du test A/B
+
 QBT_CONF = """[LegalNotice]
 Accepted=true
 
@@ -133,9 +135,18 @@ class P2PTester:
         return None
 
     # ------------------------------------------------------------------
-    def run(self, provider, vpn_container, exit_ip, minutes):
-        """Retourne un dict de metriques P2P. Ne leve jamais."""
-        res = {"ok": False, "port_forward_ok": 0, "forwarded_port": None}
+    def run(self, provider, vpn_container, exit_ip, minutes,
+            port_forwarding=None):
+        """Retourne un dict de metriques P2P. Ne leve jamais.
+
+        port_forwarding=False : bras temoin du test A/B. On ne demande aucun
+        port a gluetun et on retombe sur le port par defaut, non joignable de
+        l'exterieur. Tout le reste du test est rigoureusement identique."""
+        pcfg = self.cfg.providers.get(provider) or {}
+        want_pf = (bool(pcfg.get("port_forwarding")) if port_forwarding is None
+                   else bool(port_forwarding))
+        res = {"ok": False, "port_forward_ok": 0, "forwarded_port": None,
+               "pf_requested": 1 if want_pf else 0}
         conf_vol, dl_vol = self._volumes()
         if not conf_vol or not dl_vol:
             res["error"] = ("volumes /shared/qbt et /shared/downloads absents "
@@ -144,16 +155,14 @@ class P2PTester:
             return res
         qbt = None
         try:
-            port = self.runner.forwarded_port(vpn_container)
+            port = self.runner.forwarded_port(vpn_container) if want_pf else None
             if port:
                 res["forwarded_port"] = port
-                self.log("port forwarding obtenu : %s" % port)
+                self.log("    port forwarding obtenu : %s" % port)
             else:
-                port = 6881
-                self.log("pas de port forwarding (attendu chez NordVPN)")
-
-            # Le port est-il reellement joignable depuis l'exterieur ?
-            res["port_forward_ok"] = 1 if self._external_port_open(exit_ip, port) else 0
+                port = DEFAULT_BT_PORT
+                self.log("    sans port forwarding, port par defaut %d"
+                         % DEFAULT_BT_PORT)
 
             qbt = self._start_qbt(vpn_container, port)
             base = "http://%s:8080" % self.runner._container_ip(vpn_container)
@@ -166,6 +175,13 @@ class P2PTester:
             self._api(base, "/api/v2/app/setPreferences", "POST",
                       data={"json": '{"listen_port": %d, "upnp": false}' % port})
 
+            # qBittorrent ecoute enfin : c'est seulement maintenant qu'un test
+            # de joignabilite depuis l'exterieur veut dire quelque chose.
+            time.sleep(3)
+            res["port_forward_ok"] = 1 if self._external_port_open(exit_ip, port) else 0
+            self.log("    port %d joignable depuis l'exterieur : %s"
+                     % (port, "OUI" if res["port_forward_ok"] else "NON"))
+
             torrents = self.cfg.p2p["torrents"]
             self._api(base, "/api/v2/torrents/add", "POST",
                       data={"urls": "\n".join(torrents),
@@ -173,7 +189,8 @@ class P2PTester:
 
             res.update(self._monitor(base, minutes))
 
-            # le port est-il joignable maintenant que qBittorrent ecoute ?
+            # deuxieme chance : la redirection peut n'avoir pris effet
+            # qu'apres le debut du telechargement
             if not res["port_forward_ok"]:
                 res["port_forward_ok"] = 1 if self._external_port_open(exit_ip, port) else 0
 
@@ -195,7 +212,8 @@ class P2PTester:
     def _monitor(self, base, minutes):
         deadline = time.time() + minutes * 60
         max_bytes = self.cfg.p2p.get("max_download_gb", 4) * 1e9
-        speeds, seeds, leechs, incoming, total = [], [], [], [], 0
+        speeds, ups, seeds, leechs, incoming, peers = [], [], [], [], [], []
+        total = 0
         first_peer_s = None
         t0 = time.time()
         while time.time() < deadline:
@@ -209,8 +227,10 @@ class P2PTester:
                 continue
             t = items[0]
             speeds.append(t.get("dlspeed", 0))
+            ups.append(t.get("upspeed", 0))
             seeds.append(t.get("num_seeds", 0))
             leechs.append(t.get("num_leechs", 0))
+            peers.append(t.get("num_seeds", 0) + t.get("num_leechs", 0))
             total = max(total, t.get("downloaded", 0))
             if first_peer_s is None and (t.get("num_seeds", 0)
                                          + t.get("num_leechs", 0)) > 0:
@@ -226,8 +246,12 @@ class P2PTester:
 
         # on ignore les 2 premiers echantillons : montee en charge du swarm
         warm = speeds[2:] or speeds
+        warm_up = ups[2:] or ups
         return {
             "p2p_down_mbps": round(avg(warm) * 8 / 1e6, 2),
+            "p2p_up_mbps": round(avg(warm_up) * 8 / 1e6, 2),
+            "p2p_connected_peers": avg(peers),
+            "p2p_peers_peak": max(peers or [0]),
             "p2p_down_peak_mbps": round(max(speeds or [0]) * 8 / 1e6, 2),
             "p2p_seeds": avg(seeds),
             "p2p_leechers": avg(leechs),

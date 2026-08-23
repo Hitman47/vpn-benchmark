@@ -305,7 +305,8 @@ class Bench:
                                     (server["name"] or "auto").replace("#", "_"))
         log("%s / %s / %s" % (provider, server["country"], server["name"]))
         case = {"case_id": case_id, "run_id": self.run_id, "round": rnd,
-                "provider": provider, "country": server["country"],
+                "provider": provider, "variant": "base",
+                "country": server["country"],
                 "server": server["name"], "started_at": time.time(), "ok": 0,
                 "exit_ip": None, "exit_asn": None, "exit_org": None,
                 "exit_country": None, "note": None}
@@ -417,16 +418,7 @@ class Bench:
                 log("  test P2P (%s min)" % self.cfg.m("p2p_minutes", 5))
                 p = self.p2p.run(provider, vpn, case["exit_ip"],
                                  self.cfg.m("p2p_minutes", 5))
-                for k in ("p2p_down_mbps", "p2p_down_peak_mbps", "p2p_seeds",
-                          "p2p_leechers", "p2p_incoming_peers", "p2p_first_peer_s",
-                          "p2p_downloaded_mb"):
-                    self.metric(case_id, k, p.get(k))
-                self.metric(case_id, "port_forward_ok", p.get("port_forward_ok", 0),
-                            "0/1", p)
-                log("    torrent : %s Mb/s, %s peers entrants, port forwarding %s"
-                    % (p.get("p2p_down_mbps"), p.get("p2p_incoming_peers"),
-                       "OUI (%s)" % p.get("forwarded_port")
-                       if p.get("port_forward_ok") else "NON"))
+                self._record_p2p(case_id, p)
 
             # --- kill-switch : le trafic doit mourir avec le tunnel
             if self.cfg.m("killswitch_test") and rnd == 0:
@@ -487,6 +479,84 @@ class Bench:
         self.runner.set_vpn_status(vpn, "running")
 
     # ------------------------------------------------------------------
+    P2P_METRICS = ("p2p_down_mbps", "p2p_up_mbps", "p2p_down_peak_mbps",
+                   "p2p_seeds", "p2p_leechers", "p2p_incoming_peers",
+                   "p2p_incoming_peak", "p2p_connected_peers", "p2p_peers_peak",
+                   "p2p_first_peer_s", "p2p_downloaded_mb")
+
+    def _record_p2p(self, case_id, p):
+        for k in self.P2P_METRICS:
+            self.metric(case_id, k, p.get(k))
+        self.metric(case_id, "port_forward_ok", p.get("port_forward_ok", 0),
+                    "0/1", p)
+        log("    torrent : %s Mb/s down, %s Mb/s up, %s peers dont %s entrants, "
+            "port %s"
+            % (p.get("p2p_down_mbps"), p.get("p2p_up_mbps"),
+               p.get("p2p_connected_peers"), p.get("p2p_incoming_peers"),
+               "redirige %s" % p.get("forwarded_port")
+               if p.get("port_forward_ok") else "non joignable"))
+        if p.get("error"):
+            log("    test P2P incomplet : %s" % p["error"])
+
+    # ------------------------------------------------------------------
+    def run_pf_ab(self, provider, server, rnd):
+        """Bras temoin : meme provider, meme serveur, meme torrent, mais NAT-PMP
+        coupe. Le delta avec le cas normal mesure ce que le port forwarding
+        apporte reellement, sans comparer deux providers differents.
+
+        Enchaine immediatement le cas normal pour que le swarm soit dans un
+        etat aussi proche que possible."""
+        case_id = "%s-r%d-%s-nopf-%s" % (self.run_id, rnd, provider,
+                                         (server["name"] or "auto").replace("#", "_"))
+        log("%s / %s / %s / SANS port forwarding (temoin)"
+            % (provider, server["country"], server["name"]))
+        case = {"case_id": case_id, "run_id": self.run_id, "round": rnd,
+                "provider": provider, "variant": "nopf",
+                "country": server["country"], "server": server["name"],
+                "started_at": time.time(), "ok": 0, "exit_ip": None,
+                "exit_asn": None, "exit_org": None, "exit_country": None,
+                "note": "temoin A/B : VPN_PORT_FORWARDING=off"}
+        vpn = None
+        try:
+            try:
+                vpn, connect_s, ipinfo = self.runner.start_vpn(
+                    provider, server, pin_server=bool(server.get("id")),
+                    port_forwarding=False)
+            except VPNError:
+                # meme repli que pour un cas normal : gluetun choisit dans le pays
+                vpn, connect_s, ipinfo = self.runner.start_vpn(
+                    provider, server, pin_server=False, port_forwarding=False)
+                case["note"] += " (serveur non epingle)"
+            ident = self.runner.probe(vpn, ["ident"])
+            case.update({"ok": 1,
+                         "exit_ip": ident.get("ip") or ipinfo.get("public_ip"),
+                         "exit_asn": ident.get("asn"), "exit_org": ident.get("org"),
+                         "exit_country": ident.get("country")})
+            self.db.add_case(case)
+            self.metric(case_id, "connect_seconds", connect_s, "s")
+            p = self.p2p.run(provider, vpn, case["exit_ip"],
+                             self.cfg.m("p2p_minutes", 5), port_forwarding=False)
+            self._record_p2p(case_id, p)
+        except Exception as e:
+            case["note"] = "temoin A/B echoue : %s" % e
+            self.db.add_case(case)
+            self.db.log(self.run_id, case_id, "error", "temoin sans PF : %s" % e)
+            log("  temoin sans port forwarding indisponible : %s"
+                % str(e).splitlines()[0])
+        finally:
+            if vpn is not None:
+                try:
+                    vpn.remove(force=True)
+                except Exception:
+                    pass
+
+    def _pf_ab_providers(self):
+        """Providers pour lesquels le test A/B du port forwarding a un sens."""
+        if not self.cfg.p2p.get("port_forward_ab", True):
+            return []
+        return [p for p, c in self.cfg.providers.items() if c.get("port_forwarding")]
+
+    # ------------------------------------------------------------------
     def run(self):
         rounds = self.cfg.m("rounds", 1)
         interval = self.cfg.m("interval_seconds", 0)
@@ -506,10 +576,16 @@ class Bench:
                     self.db.log(self.run_id, None, "error", "baseline: %s" % e)
             seq = order if rnd % 2 == 0 else list(reversed(order))
             do_p2p = (p2p_every > 0) and (rnd % p2p_every == 0)
+            ab = self._pf_ab_providers() if do_p2p and self.cfg.p2p.get("enabled") else []
             for provider in seq:
                 for server in matrix[provider]:
                     self.run_case(provider, server, rnd, do_p2p)
                     time.sleep(self.cfg.rt("between_cases_seconds", 5))
+                    if provider in ab and server is matrix[provider][0]:
+                        # un seul serveur suffit : on isole le port forwarding,
+                        # pas le serveur
+                        self.run_pf_ab(provider, server, rnd)
+                        time.sleep(self.cfg.rt("between_cases_seconds", 5))
             if rnd < rounds - 1 and interval > 0:
                 wait = max(0, interval - (time.time() - t_round))
                 if wait:
@@ -524,9 +600,10 @@ def finalize(cfg, db, run_id):
     scores = scorer.score(agg)
     overhead = scorer.overhead_vs_baseline(agg)
     verdict = scorer.verdict(scores, agg)
-    rep.print_summary(agg, scores, overhead, verdict, log)
+    pf_ab = scorer.port_forward_ab()
+    rep.print_summary(agg, scores, overhead, verdict, log, pf_ab)
     html_path, compose = rep.write_report(db, cfg, agg, scores, overhead,
-                                          verdict, run_id, RESULTS_DIR)
+                                          verdict, run_id, RESULTS_DIR, pf_ab)
     csvs = db.export_csv(RESULTS_DIR)
     log("rapport   : %s" % html_path)
     if compose:

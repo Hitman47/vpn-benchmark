@@ -15,8 +15,12 @@ METRIC_LABELS = {
     "connect_seconds": ("Temps de connexion", "s"),
     "success_rate_pct": ("Taux de connexions reussies", "%"),
     "p2p_down_mbps": ("Debit torrent", "Mb/s"),
+    "p2p_up_mbps": ("Debit torrent montant", "Mb/s"),
     "p2p_incoming_peers": ("Peers entrants", "peers"),
+    "p2p_connected_peers": ("Peers connectes", "peers"),
     "p2p_seeds": ("Seeds vus", "peers"),
+    "p2p_first_peer_s": ("Delai avant le 1er peer", "s"),
+    "p2p_downloaded_mb": ("Volume telecharge", "Mo"),
     "port_forward_ok": ("Port forwarding fonctionnel", "0/1"),
     "leak_count": ("Fuites detectees", "nb"),
     "cpu_max_pct": ("CPU max du conteneur VPN", "%"),
@@ -47,7 +51,7 @@ def fmt(v):
 # --------------------------------------------------------------------------
 # resume terminal
 # --------------------------------------------------------------------------
-def print_summary(agg, scores, overhead, verdict, log=print):
+def print_summary(agg, scores, overhead, verdict, log=print, pf_ab=None):
     providers = [p for p in ("baseline", "nordvpn", "protonvpn") if p in agg]
     vpns = [p for p in providers if p != "baseline"]
     width = 34
@@ -90,6 +94,19 @@ def print_summary(agg, scores, overhead, verdict, log=print):
     else:
         log("PAS DE VERDICT : %s" % verdict.get("reason", "donnees insuffisantes"))
     log("")
+    for provider, row in (pf_ab or {}).items():
+        log("INTERET DU PORT FORWARDING - %s" % PROVIDER_LABELS.get(provider, provider))
+        log("  %-30s %12s %12s %10s" % ("metrique", "avec PF", "sans PF", "ecart"))
+        for metric, d in row["metrics"].items():
+            pct = d.get("delta_pct")
+            log("  %-30s %12s %12s %10s"
+                % (label(metric)[:30], fmt(d["with_pf"]), fmt(d["without_pf"]),
+                   "-" if pct is None else
+                   ("+inf" if pct == float("inf") else "%+.0f%%" % pct)))
+        log("  -> %s" % row["conclusion"])
+        log("  (bras temoin : %d cas, %d reussis)"
+            % (row["n_cases_nopf"], row["n_ok_nopf"]))
+        log("")
 
 
 # --------------------------------------------------------------------------
@@ -186,7 +203,44 @@ background:var(--card);border:1px solid var(--line);color:var(--muted)}
 """
 
 
-def build_html(db, cfg, agg, scores, overhead, verdict, run_id):
+def pf_ab_section(pf_ab):
+    """Section dediee : ce que le port forwarding change, a provider constant."""
+    if not pf_ab:
+        return ""
+    h = ['<h2>Interet du port forwarding</h2>',
+         '<div class="note">Comparaison a <b>provider et serveur constants</b> : '
+         'le meme test torrent est rejoue immediatement apres, NAT-PMP coupe. '
+         'Cet ecart mesure ce que la redirection de port apporte reellement, '
+         'sans le confondre avec les differences entre deux operateurs.</div>']
+    for provider, row in pf_ab.items():
+        h.append('<div class="card"><b>%s</b>'
+                 % html.escape(PROVIDER_LABELS.get(provider, provider)))
+        h.append('<div class="scroll"><table>')
+        h.append('<tr><th>Metrique</th><th>Avec port forwarding</th>'
+                 '<th>Sans</th><th>Ecart</th></tr>')
+        for metric, d in row["metrics"].items():
+            pct = d.get("delta_pct")
+            if pct is None:
+                ecart = "-"
+            elif pct == float("inf"):
+                ecart = "de 0 a %s" % fmt(d["with_pf"])
+            else:
+                ecart = "%+.0f%%" % pct
+            better = (d["delta"] or 0) > 0
+            h.append('<tr><td>%s <span class="badge">%s</span></td>'
+                     '<td class="%s">%s</td><td>%s</td><td>%s</td></tr>'
+                     % (html.escape(label(metric)), html.escape(unit(metric)),
+                        "win" if better else "", fmt(d["with_pf"]),
+                        fmt(d["without_pf"]), ecart))
+        h.append('</table></div>')
+        h.append('<div class="note">%s<br>Bras temoin : %d cas, %d reussis.</div>'
+                 % (html.escape(row["conclusion"]), row["n_cases_nopf"],
+                    row["n_ok_nopf"]))
+        h.append('</div>')
+    return "".join(h)
+
+
+def build_html(db, cfg, agg, scores, overhead, verdict, run_id, pf_ab=None):
     providers = [p for p in ("baseline", "nordvpn", "protonvpn") if p in agg]
     vpns = [p for p in providers if p != "baseline"]
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -273,6 +327,8 @@ def build_html(db, cfg, agg, scores, overhead, verdict, run_id):
         if svg:
             h.append('<div class="card"><b>%s</b> <span class="badge">%s</span>%s</div>'
                      % (html.escape(label(metric)), html.escape(unit(metric)), svg))
+
+    h.append(pf_ab_section(pf_ab))
 
     # --- evolution temporelle
     series = {}
@@ -373,11 +429,13 @@ def write_winner_compose(path, provider, agg, cfg):
     return path
 
 
-def write_report(db, cfg, agg, scores, overhead, verdict, run_id, results_dir):
+def write_report(db, cfg, agg, scores, overhead, verdict, run_id, results_dir,
+                 pf_ab=None):
     os.makedirs(results_dir, exist_ok=True)
     html_path = os.path.join(results_dir, "report.html")
     with open(html_path, "w", encoding="utf-8") as f:
-        f.write(build_html(db, cfg, agg, scores, overhead, verdict, run_id))
+        f.write(build_html(db, cfg, agg, scores, overhead, verdict, run_id,
+                           pf_ab))
     compose = None
     if verdict.get("winner"):
         compose = write_winner_compose(

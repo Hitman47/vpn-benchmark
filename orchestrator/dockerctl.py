@@ -215,16 +215,21 @@ class Runner:
     # ------------------------------------------------------------------
     # gluetun
     # ------------------------------------------------------------------
-    def start_vpn(self, provider, server, extra_env=None, pin_server=True):
+    def start_vpn(self, provider, server, extra_env=None, pin_server=True,
+                  port_forwarding=None):
         """Demarre gluetun. pin_server=False ignore le serveur choisi et laisse
         gluetun piocher dans le pays : utile en repli quand la liste embarquee
         de gluetun ne connait pas encore ce serveur.
+
+        port_forwarding=False coupe explicitement le NAT-PMP meme si le
+        provider le supporte : c'est le bras temoin du test A/B.
 
         Si gluetun rejette une route de la config d'authentification (la liste
         change selon les versions), on la retire et on reessaie."""
         for _ in range(len(DEFAULT_AUTH_ROUTES) + 1):
             try:
-                return self._start_vpn_once(provider, server, extra_env, pin_server)
+                return self._start_vpn_once(provider, server, extra_env,
+                                            pin_server, port_forwarding)
             except VPNError as e:
                 bad = _unsupported_route(str(e))
                 if not bad or bad not in self.auth_routes:
@@ -235,7 +240,8 @@ class Runner:
                          "retiree de la config d'auth, nouvel essai" % bad)
         raise VPNError("config d'authentification gluetun irreconciliable")
 
-    def _start_vpn_once(self, provider, server, extra_env=None, pin_server=True):
+    def _start_vpn_once(self, provider, server, extra_env=None, pin_server=True,
+                        port_forwarding=None):
         name = "%s-vpn" % self.cfg.project
         try:
             self.client.containers.get(name).remove(force=True)
@@ -261,9 +267,13 @@ class Runner:
             env.update(gluetun_server_env(provider, server))
         else:
             env["SERVER_COUNTRIES"] = server["country"]
-        if pcfg.get("port_forwarding"):
+        want_pf = (pcfg.get("port_forwarding") if port_forwarding is None
+                   else bool(port_forwarding))
+        if want_pf:
             env["VPN_PORT_FORWARDING"] = "on"
             env["VPN_PORT_FORWARDING_PROVIDER"] = pcfg["gluetun_provider"]
+        else:
+            env["VPN_PORT_FORWARDING"] = "off"
         env.update(extra_env or {})
 
         volumes = {}
