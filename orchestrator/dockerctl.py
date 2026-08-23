@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import tarfile
 import threading
@@ -80,6 +81,27 @@ class Runner:
         log("image de sonde : %s" % self.image)
         log("reseau         : %s (%s)" % (self.network, self.net_subnet))
         log("volumes        : %s" % (self.volumes or "aucun"))
+        self._log_downloads_location()
+
+    def _log_downloads_location(self):
+        """Le test P2P peut ecrire plusieurs Go : il faut savoir ou ils vont."""
+        dest = "/shared/downloads"
+        src = self.volumes.get(dest)
+        if not src:
+            self.log("telechargements : AUCUN volume monte sur %s, "
+                     "le test P2P sera desactive" % dest)
+            return
+        kind = ("chemin de l'hote" if src.startswith("/")
+                else "volume Docker nomme (disque systeme)")
+        free = ""
+        try:
+            free = " - %.1f Go libres" % (shutil.disk_usage(dest).free / 1e9)
+        except OSError:
+            pass
+        self.log("telechargements : %s (%s)%s" % (src, kind, free))
+        if not src.startswith("/"):
+            self.log("  pour les ecrire ailleurs (NVMe dedie), renseigne "
+                     "BENCH_DOWNLOADS_PATH dans la stack")
 
     # ------------------------------------------------------------------
     # auto-decouverte
@@ -133,10 +155,22 @@ class Runner:
             return "172.16.0.0/12"
 
     def _self_volumes(self):
+        """Montages de l'orchestrateur, par destination.
+
+        Un volume nomme est relaye par son nom, un bind mount par son chemin
+        sur l'hote : les deux sont utilisables tels quels pour monter la meme
+        chose dans les conteneurs qu'on cree. C'est ce qui permet de sortir
+        les telechargements P2P du disque systeme (BENCH_DOWNLOADS_PATH).
+        """
         vols = {}
         for m in self.me.attrs.get("Mounts") or []:
+            dest = m.get("Destination")
+            if not dest or dest == "/var/run/docker.sock":
+                continue
             if m.get("Type") == "volume" and m.get("Name"):
-                vols[m.get("Destination")] = m["Name"]
+                vols[dest] = m["Name"]
+            elif m.get("Type") == "bind" and m.get("Source"):
+                vols[dest] = m["Source"]
         return vols
 
     def _write_auth_config(self):

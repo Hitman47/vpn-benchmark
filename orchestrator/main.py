@@ -550,6 +550,19 @@ class Bench:
                 except Exception:
                     pass
 
+    def p2p_countries(self):
+        """Pays ou le test torrent est joue. Il coute cher (et jusqu'a deux fois
+        p2p_minutes chez Proton avec le bras temoin) : le limiter aux premiers
+        pays de la liste evite qu'un round deborde son intervalle, sans rien
+        perdre puisque le swarm est le meme partout."""
+        countries = list(self.cfg.m("countries", []))
+        limit = self.cfg.m("p2p_max_countries", 0) or 0
+        keep = countries[:limit] if limit > 0 else countries
+        if keep != countries:
+            log("test torrent limite a : %s (sur %s)"
+                % (", ".join(keep), ", ".join(countries)))
+        return keep
+
     def _pf_ab_providers(self):
         """Providers pour lesquels le test A/B du port forwarding a un sens."""
         if not self.cfg.p2p.get("port_forward_ab", True):
@@ -561,6 +574,7 @@ class Bench:
         rounds = self.cfg.m("rounds", 1)
         interval = self.cfg.m("interval_seconds", 0)
         p2p_every = self.cfg.m("p2p_every_rounds", 1)
+        p2p_countries = self.p2p_countries()
         self.download_url = self.pick_download_target()
         log("selection des serveurs")
         matrix = self.build_matrix()
@@ -578,14 +592,22 @@ class Bench:
             do_p2p = (p2p_every > 0) and (rnd % p2p_every == 0)
             ab = self._pf_ab_providers() if do_p2p and self.cfg.p2p.get("enabled") else []
             for provider in seq:
+                done_p2p = set()
                 for server in matrix[provider]:
-                    self.run_case(provider, server, rnd, do_p2p)
+                    country = server["country"]
+                    # meme liste de pays P2P pour les deux providers, sinon la
+                    # comparaison torrent porterait sur des pays differents
+                    case_p2p = (do_p2p and country in p2p_countries
+                                and country not in done_p2p)
+                    self.run_case(provider, server, rnd, case_p2p)
                     time.sleep(self.cfg.rt("between_cases_seconds", 5))
-                    if provider in ab and server is matrix[provider][0]:
-                        # un seul serveur suffit : on isole le port forwarding,
-                        # pas le serveur
-                        self.run_pf_ab(provider, server, rnd)
-                        time.sleep(self.cfg.rt("between_cases_seconds", 5))
+                    if case_p2p:
+                        done_p2p.add(country)
+                        if provider in ab:
+                            # meme serveur, port forwarding coupe : on isole la
+                            # redirection de port, pas le serveur ni le pays
+                            self.run_pf_ab(provider, server, rnd)
+                            time.sleep(self.cfg.rt("between_cases_seconds", 5))
             if rnd < rounds - 1 and interval > 0:
                 wait = max(0, interval - (time.time() - t_round))
                 if wait:

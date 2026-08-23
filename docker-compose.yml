@@ -25,7 +25,7 @@ services:
       GLUETUN_IMAGE: ${GLUETUN_IMAGE:-qmcgaw/gluetun:v3.40}
       BENCH_GLUETUN_LOG_LEVEL: ${BENCH_GLUETUN_LOG_LEVEL:-info}  # debug si un tunnel refuse de monter
       # --- campagne ---------------------------------------------------------
-      BENCH_MODE: ${BENCH_MODE:-smoke}          # preflight | smoke | full | report
+      BENCH_MODE: ${BENCH_MODE:-smoke}          # preflight | smoke | multi | full | report
       BENCH_COUNTRIES: ${BENCH_COUNTRIES:-}     # ex: Netherlands,Switzerland,Sweden
       BENCH_ROUNDS: ${BENCH_ROUNDS:-}
       BENCH_INTERVAL_MINUTES: ${BENCH_INTERVAL_MINUTES:-}
@@ -34,6 +34,7 @@ services:
       BENCH_P2P_MINUTES: ${BENCH_P2P_MINUTES:-}
       BENCH_PF_AB: ${BENCH_PF_AB:-}
       BENCH_P2P_EVERY_ROUNDS: ${BENCH_P2P_EVERY_ROUNDS:-}
+      BENCH_P2P_MAX_COUNTRIES: ${BENCH_P2P_MAX_COUNTRIES:-}
       BENCH_MAX_DOWNLOAD_GB: ${BENCH_MAX_DOWNLOAD_GB:-}
       BENCH_THROUGHPUT_SECONDS: ${BENCH_THROUGHPUT_SECONDS:-}
       BENCH_THROUGHPUT_STREAMS: ${BENCH_THROUGHPUT_STREAMS:-}
@@ -58,7 +59,10 @@ services:
       - results:/app/results        # base SQLite, CSV, report.html
       - auth:/shared/auth           # config d'auth du control server gluetun
       - qbt:/shared/qbt             # config qBittorrent generee
-      - downloads:/shared/downloads # telechargements du test P2P (vides apres)
+      # BENCH_DOWNLOADS_PATH=/chemin/sur/le/nvme pour sortir les
+      # telechargements P2P du disque systeme. Non renseigne, ils vont dans un
+      # volume Docker (donc sur le disque systeme du NAS).
+      - ${BENCH_DOWNLOADS_PATH:-downloads}:/shared/downloads # telechargements du test P2P (vides apres)
       # facultatif : deposer un bench.yaml personnalise dans ce volume pour
       # surcharger celui embarque dans l'image (poids du score, cibles, etc.)
       # - config:/config

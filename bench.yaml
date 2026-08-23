@@ -46,6 +46,28 @@ modes:
     p2p_minutes: 0
     killswitch_test: false
 
+  # Une passe complete sur plusieurs pays : les DEUX providers sont mesures
+  # sur exactement la meme liste de pays, avec toute la batterie de tests.
+  # Un pays ou un seul des deux se connecte est exclu du score et signale.
+  # Compter ~15 min par pays et par provider. Le test torrent, lui, ne tourne
+  # que sur les p2p_max_countries premiers pays : il coute 2x p2p_minutes chez
+  # Proton (bras temoin sans port forwarding) et n'apprend rien de plus a etre
+  # rejoue dans chaque pays.
+  multi:
+    rounds: 1
+    interval_seconds: 0
+    countries: [Netherlands, Switzerland, Sweden, France]
+    servers_per_country: 1
+    include_baseline: true
+    latency_count: 25
+    throughput_seconds: 10
+    throughput_streams: 8
+    web_repeats: 2
+    p2p_every_rounds: 1
+    p2p_minutes: 5
+    p2p_max_countries: 1
+    killswitch_test: true
+
   full:
     rounds: 24                    # 24 rounds x 1h = ~24h
     interval_seconds: 3600        # temps minimum entre 2 debuts de round
@@ -58,6 +80,7 @@ modes:
     web_repeats: 3
     p2p_every_rounds: 4           # test torrent 1 round sur 4 (couteux)
     p2p_minutes: 8
+    p2p_max_countries: 1          # sinon un round P2P deborde l'intervalle
     killswitch_test: true
 
 # --- Cibles de mesure ----------------------------------------

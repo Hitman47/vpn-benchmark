@@ -80,6 +80,45 @@ config gluetun prête à l'emploi du provider gagnant.
 
 Le résumé comparatif est aussi imprimé dans les **logs du conteneur**, en clair.
 
+### Tester plusieurs pays en une passe
+
+```bash
+BENCH_MODE=multi
+```
+
+Les **deux** providers sont mesurés sur exactement la même liste de pays
+(`Netherlands, Switzerland, Sweden, France` par défaut, modifiable par
+`BENCH_COUNTRIES`), avec toute la batterie de tests et une baseline. Compter
+~15 min par pays et par provider, soit ~2 h pour quatre pays.
+
+Le test torrent, lui, ne tourne que sur le **premier** pays
+(`BENCH_P2P_MAX_COUNTRIES`) : il coûte deux fois `BENCH_P2P_MINUTES` chez Proton
+à cause du bras témoin sans port forwarding, et le swarm est le même partout —
+le rejouer dans chaque pays allongerait la campagne sans rien apprendre. Mets
+`BENCH_P2P_MAX_COUNTRIES=0` si tu veux quand même le torrent partout.
+
+Un pays où un seul des deux providers arrive à se connecter est **exclu du
+score** et signalé comme tel dans le rapport : lance `BENCH_MODE=preflight`
+avant si tu veux savoir à l'avance lesquels tiendront.
+
+### Où atterrissent les téléchargements du test P2P
+
+Par défaut dans un volume Docker, donc sur le **disque système** du NAS. Le test
+torrent peut y écrire plusieurs Go (plafonné par `BENCH_MAX_DOWNLOAD_GB`, purgé
+après chaque cas). Pour l'envoyer ailleurs :
+
+```bash
+BENCH_DOWNLOADS_PATH=/mnt/nvme/vpnbench-downloads
+```
+
+Le répertoire doit **exister** sur l'hôte et être inscriptible avant le
+déploiement, sinon Docker refuse de démarrer le conteneur. L'orchestrateur écrit
+au démarrage la destination retenue et l'espace libre :
+
+```
+telechargements : /mnt/nvme/vpnbench-downloads (chemin de l'hote) - 812.4 Go libres
+```
+
 ### Vérifier d'abord que les deux clés couvrent les mêmes pays
 
 ```
@@ -125,6 +164,7 @@ lui-même un conteneur `vpnbench-vpn` pour chaque serveur testé.
 |---|---|
 | Vérifier les clés ~2 min | `BENCH_MODE=preflight` → Deploy |
 | Validation ~20 min | `BENCH_MODE=smoke` → Deploy |
+| Tous les pays d'un coup ~2 h | `BENCH_MODE=multi` → Update the stack |
 | Campagne ~24 h | `BENCH_MODE=full` → Update the stack (re-deploy) |
 | Repondérer le verdict sans remesurer | `BENCH_MODE=report` → Update the stack |
 
@@ -162,7 +202,7 @@ donc rien d'autre à remplir pour démarrer.
 
 | Variable | Défaut smoke / full | Effet |
 |---|---|---|
-| `BENCH_MODE` | `smoke` | `preflight` / `smoke` / `full` / `report` |
+| `BENCH_MODE` | `smoke` | `preflight` / `smoke` / `multi` / `full` / `report` |
 | `BENCH_COUNTRIES` | `Netherlands` / `Netherlands,Switzerland,Sweden` | pays de sortie testés |
 | `BENCH_ROUNDS` | `1` / `24` | nombre de passes |
 | `BENCH_INTERVAL_MINUTES` | `0` / `60` | espacement entre deux débuts de passe |
@@ -176,6 +216,8 @@ donc rien d'autre à remplir pour démarrer.
 | `BENCH_P2P_ENABLED` | `true` | active le test torrent réel |
 | `BENCH_P2P_MINUTES` | `3` / `8` | durée d'un test torrent |
 | `BENCH_PF_AB` | `true` | rejoue le test torrent **sans** port forwarding sur le même serveur ProtonVPN, pour isoler l'apport du NAT-PMP (double la durée P2P) |
+| `BENCH_P2P_MAX_COUNTRIES` | `1` | nombre de pays où le test torrent est joué (les premiers de `BENCH_COUNTRIES`) ; `0` = tous |
+| `BENCH_DOWNLOADS_PATH` | *(vide)* | chemin **de l'hôte** où écrire les téléchargements P2P, par ex. un NVMe dédié. Vide = volume Docker, donc disque système du NAS |
 | `BENCH_P2P_EVERY_ROUNDS` | `1` / `4` | fréquence du test torrent |
 | `BENCH_MAX_DOWNLOAD_GB` | `4` | garde-fou sur le volume téléchargé |
 

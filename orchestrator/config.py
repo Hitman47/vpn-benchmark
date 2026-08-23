@@ -101,6 +101,7 @@ class Config:
         num("BENCH_WEB_REPEATS", "web_repeats")
         num("BENCH_P2P_MINUTES", "p2p_minutes")
         num("BENCH_P2P_EVERY_ROUNDS", "p2p_every_rounds")
+        num("BENCH_P2P_MAX_COUNTRIES", "p2p_max_countries")
         num("BENCH_MAX_DOWNLOAD_GB", "max_download_gb", float, self.p2p)
 
         v = os.environ.get("BENCH_INTERVAL_MINUTES")
