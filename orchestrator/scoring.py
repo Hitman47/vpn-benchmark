@@ -46,6 +46,7 @@ class Scorer:
             row["_p95_latency_ms"] = p95(
                 self.db.metric_values(provider, "latency_avg_ms", self.run_id))
             row["_n_cases"] = len(cases)
+            row["_n_ok"] = sum(1 for c in cases if c["ok"])
             agg[provider] = row
         return agg
 
@@ -67,7 +68,8 @@ class Scorer:
             higher = self.hib.get(metric, True)
             if higher:
                 best = max(present.values())
-                norm = {p: (v / best if best > 0 else 1.0)
+                # si le meilleur vaut 0, personne n'a rien obtenu : 0 point
+                norm = {p: (v / best if best > 0 else 0.0)
                         for p, v in present.items()}
             else:
                 best = min(present.values())
@@ -128,6 +130,11 @@ class Scorer:
         vpns = sorted(scores, key=lambda p: scores[p]["score"], reverse=True)
         if not vpns:
             return {"winner": None, "reason": "aucune donnee"}
+        if not any((agg[p].get("_n_ok") or 0) > 0 for p in vpns):
+            return {"winner": None, "ranking": vpns, "confidence": "nulle",
+                    "reason": "aucun tunnel n'a pu etre etabli : rien a comparer. "
+                              "Voir les fichiers de /failures/ et la section "
+                              "Incidents du rapport."}
         winner = vpns[0]
         gap = (scores[winner]["score"] - scores[vpns[-1]]["score"]
                if len(vpns) > 1 else 0)

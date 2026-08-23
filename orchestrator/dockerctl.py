@@ -153,7 +153,10 @@ class Runner:
     # ------------------------------------------------------------------
     # gluetun
     # ------------------------------------------------------------------
-    def start_vpn(self, provider, server, extra_env=None):
+    def start_vpn(self, provider, server, extra_env=None, pin_server=True):
+        """Demarre gluetun. pin_server=False ignore le serveur choisi et laisse
+        gluetun piocher dans le pays : utile en repli quand la liste embarquee
+        de gluetun ne connait pas encore ce serveur."""
         name = "%s-vpn" % self.cfg.project
         try:
             self.client.containers.get(name).remove(force=True)
@@ -171,11 +174,14 @@ class Runner:
             "FIREWALL_INPUT_PORTS": "8000,8080",
             "HTTP_CONTROL_SERVER_ADDRESS": ":%d" % CONTROL_PORT,
             "HEALTH_TARGET_ADDRESS": "1.1.1.1:443",
-            "LOG_LEVEL": "info",
+            "LOG_LEVEL": os.environ.get("BENCH_GLUETUN_LOG_LEVEL", "info"),
             "UPDATER_PERIOD": "0",
         }
         env.update(self.cfg.keys[provider])
-        env.update(gluetun_server_env(provider, server))
+        if pin_server:
+            env.update(gluetun_server_env(provider, server))
+        else:
+            env["SERVER_COUNTRIES"] = server["country"]
         if pcfg.get("port_forwarding"):
             env["VPN_PORT_FORWARDING"] = "on"
             env["VPN_PORT_FORWARDING_PROVIDER"] = pcfg["gluetun_provider"]
@@ -209,6 +215,29 @@ class Runner:
     def control_url(self, container, path):
         return "http://%s:%d%s" % (self._container_ip(container), CONTROL_PORT, path)
 
+    def diagnose(self, container, header):
+        """Rassemble tout ce qui explique un echec : code de sortie, message
+        d'erreur du moteur, et la totalite des logs du conteneur."""
+        parts = [header]
+        try:
+            container.reload()
+            state = container.attrs.get("State") or {}
+            parts.append("etat=%s code_sortie=%s oom=%s"
+                         % (state.get("Status"), state.get("ExitCode"),
+                            state.get("OOMKilled")))
+            if state.get("Error"):
+                parts.append("erreur moteur : %s" % state["Error"])
+        except docker.errors.APIError as e:
+            parts.append("inspection impossible : %s" % e)
+        try:
+            logs = container.logs(stdout=True, stderr=True).decode("utf-8", "replace")
+        except docker.errors.APIError as e:
+            logs = "(logs illisibles : %s)" % e
+        logs = logs.strip()
+        parts.append("--- logs gluetun ---")
+        parts.append(logs if logs else "(le conteneur n'a rien ecrit)")
+        return "\n".join(parts)
+
     def _wait_ready(self, container, t0):
         """Attend que gluetun annonce une IP publique via son control server."""
         timeout = self.cfg.rt("gluetun_ready_timeout", 120)
@@ -216,8 +245,8 @@ class Runner:
         while time.time() - t0 < timeout:
             container.reload()
             if container.status not in ("running", "created"):
-                logs = container.logs(tail=25).decode("utf-8", "replace")
-                raise VPNError("gluetun arrete (%s):\n%s" % (container.status, logs))
+                raise VPNError(self.diagnose(
+                    container, "gluetun s'est arrete avant d'etablir le tunnel"))
             try:
                 r = requests.get(self.control_url(container, "/v1/publicip/ip"),
                                  timeout=4)
@@ -227,13 +256,14 @@ class Runner:
                         return d
                 elif r.status_code == 401:
                     raise VPNError(
-                        "control server protege : ajoute le volume /shared/auth "
-                        "a la stack (voir docker-compose.yml)")
+                        "control server protege : le volume /shared/auth n'est "
+                        "pas monte ou la config d'auth n'a pas ete ecrite")
             except (requests.RequestException, ValueError) as e:
                 last_err = e
             time.sleep(2)
-        logs = container.logs(tail=30).decode("utf-8", "replace")
-        raise VPNError("tunnel non etabli en %ss (%s)\n%s" % (timeout, last_err, logs))
+        raise VPNError(self.diagnose(
+            container, "tunnel non etabli en %ss (dernier essai : %s)"
+                       % (timeout, last_err)))
 
     def forwarded_port(self, container):
         for path in ("/v1/portforwarded", "/v1/openvpn/portforwarded"):

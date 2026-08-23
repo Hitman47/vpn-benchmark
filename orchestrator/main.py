@@ -89,6 +89,19 @@ class Bench:
     def metric(self, case_id, name, value, unit=None, extra=None):
         self.db.add_metric(case_id, name, value, unit, extra)
 
+    def _dump_failure(self, case_id, text):
+        """Ecrit le detail d'un echec dans results/failures/, consultable sur
+        http://<ip-du-nas>:8888/failures/ sans shell sur le NAS."""
+        directory = os.path.join(RESULTS_DIR, "failures")
+        try:
+            os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, "%s.log" % case_id)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            log("  detail complet : /failures/%s.log" % case_id)
+        except OSError as e:
+            log("  impossible d'ecrire le detail de l'echec (%s)" % e)
+
     def _record_common(self, case_id, latency, throughput, loaded, web):
         if latency.get("ok"):
             a = latency["aggregate"]
@@ -156,15 +169,37 @@ class Bench:
                 "exit_ip": None, "exit_asn": None, "exit_org": None,
                 "exit_country": None, "note": None}
 
-        vpn = None
-        try:
-            vpn, connect_s, ipinfo = self.runner.start_vpn(provider, server)
-        except VPNError as e:
-            case["note"] = str(e)[:500]
+        vpn = connect_s = ipinfo = None
+        failures = []
+        # 1er essai sur le serveur choisi, 2e essai en laissant gluetun piocher
+        # dans le pays : sa liste embarquee ignore parfois un serveur recent.
+        for attempt, pin in enumerate((True, False)):
+            try:
+                vpn, connect_s, ipinfo = self.runner.start_vpn(
+                    provider, server, pin_server=pin)
+                if attempt:
+                    log("  repli reussi : serveur choisi par gluetun dans %s"
+                        % server["country"])
+                    case["note"] = "repli : serveur non epingle"
+                break
+            except VPNError as e:
+                failures.append("=== essai %d (%s) ===\n%s"
+                                % (attempt + 1,
+                                   "serveur epingle" if pin else "pays seul", e))
+                log("  ECHEC connexion (essai %d, %s) :"
+                    % (attempt + 1, "epingle" if pin else "pays seul"))
+                for line in str(e).splitlines():
+                    log("    | %s" % line)
+                if pin and server.get("id"):
+                    log("  nouvel essai sans epingler le serveur")
+
+        if vpn is None:
+            case["note"] = "\n".join(failures)[:2000]
             self.db.add_case(case)
             self.db.log(self.run_id, case_id, "error",
-                        "connexion impossible %s/%s: %s" % (provider, server["name"], e))
-            log("  ECHEC connexion : %s" % str(e).splitlines()[0])
+                        "connexion impossible %s/%s:\n%s"
+                        % (provider, server["name"], "\n".join(failures)))
+            self._dump_failure(case_id, "\n\n".join(failures))
             self.metric(case_id, "connect_failed", 1)
             return
 

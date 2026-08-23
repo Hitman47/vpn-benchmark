@@ -120,18 +120,30 @@ DOWN_URL = "https://speed.cloudflare.com/__down?bytes={n}"
 UP_URL = "https://speed.cloudflare.com/__up"
 
 
-def _one_download(seconds, chunk_bytes):
-    cmd = CURL + [
-        "--max-time", str(seconds), "-o", "/dev/null",
-        "-w", "%{size_download} %{time_total}",
-        DOWN_URL.format(n=chunk_bytes),
-    ]
-    rc, so, se = sh(cmd, timeout=seconds + 20)
-    try:
-        size, dur = so.split()
-        return float(size), float(dur)
-    except ValueError:
-        return 0.0, 0.0
+# Cloudflare refuse les tailles trop grandes : on enchaine des morceaux courts
+# dans UN SEUL appel curl, ce qui reutilise la connexion TLS d'un morceau a
+# l'autre. C'est --max-time qui borne la mesure, pas le nombre de morceaux.
+CHUNK_BYTES = 10000000
+MAX_CHUNKS = 1200
+
+
+def _one_download(seconds, chunk_bytes=CHUNK_BYTES, chunks=MAX_CHUNKS):
+    url = DOWN_URL.format(n=chunk_bytes)
+    cmd = CURL + ["--max-time", str(seconds), "-o", "/dev/null",
+                  "-w", "%{size_download} %{http_code}\n"] + [url] * chunks
+    rc, so, se = sh(cmd, timeout=seconds + 25)
+    total, codes = 0.0, set()
+    for line in so.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            total += float(parts[0])
+        except ValueError:
+            continue
+        codes.add(parts[1])
+    info = ",".join(sorted(codes)) if codes else "curl_rc=%d %s" % (rc, se[:120])
+    return total, info
 
 
 def _one_upload(seconds, mbytes):
@@ -139,15 +151,17 @@ def _one_upload(seconds, mbytes):
     script = (
         "dd if=/dev/zero bs=1M count=%d 2>/dev/null | "
         "curl -sS --max-time %d -o /dev/null "
-        "-w '%%{size_upload} %%{time_total}' -X POST "
+        "-w '%%{size_upload} %%{http_code}' -X POST "
         "-H 'Content-Type: application/octet-stream' --data-binary @- %s"
     ) % (mbytes, seconds, UP_URL)
     rc, so, se = sh(["sh", "-c", script], timeout=seconds + 25)
+    parts = so.split()
+    if len(parts) != 2:
+        return 0.0, "curl_rc=%d %s" % (rc, se[:120])
     try:
-        size, dur = so.split()
-        return float(size), float(dur)
+        return float(parts[0]), parts[1]
     except ValueError:
-        return 0.0, 0.0
+        return 0.0, "illisible"
 
 
 def _parallel(fn, streams, *fnargs):
@@ -156,26 +170,25 @@ def _parallel(fn, streams, *fnargs):
         results = list(ex.map(lambda _: fn(*fnargs), range(streams)))
     wall = time.time() - t0
     total_bytes = sum(r[0] for r in results)
+    info = ",".join(sorted({str(r[1]) for r in results}))
     if wall <= 0 or total_bytes <= 0:
-        return 0.0, total_bytes, round(wall, 2)
-    return round(total_bytes * 8 / wall / 1e6, 2), total_bytes, round(wall, 2)
+        return 0.0, total_bytes, round(wall, 2), info
+    return round(total_bytes * 8 / wall / 1e6, 2), total_bytes, round(wall, 2), info
 
 
 def cmd_throughput(args):
     res = {"ok": False}
-    # chaque flux demande beaucoup plus que ce qu'il pourra tirer : c'est
-    # --max-time qui borne, la mesure est donc un debit soutenu sur la duree
-    chunk = 2000000000
-    down_mbps, down_bytes, down_wall = _parallel(
-        _one_download, args.streams, args.seconds, chunk)
+    down_mbps, down_bytes, down_wall, down_info = _parallel(
+        _one_download, args.streams, args.seconds)
     res.update({"down_mbps": down_mbps, "down_bytes": down_bytes,
-                "down_seconds": down_wall})
+                "down_seconds": down_wall, "down_http": down_info})
     if not args.skip_upload:
         up_streams = max(1, args.streams // 2)
-        up_mbps, up_bytes, up_wall = _parallel(
+        up_mbps, up_bytes, up_wall, up_info = _parallel(
             _one_upload, up_streams, args.seconds, 400)
         res.update({"up_mbps": up_mbps, "up_bytes": up_bytes,
-                    "up_seconds": up_wall, "up_streams": up_streams})
+                    "up_seconds": up_wall, "up_streams": up_streams,
+                    "up_http": up_info})
     res["ok"] = res.get("down_mbps", 0) > 0
     res["streams"] = args.streams
     return res
@@ -188,9 +201,8 @@ def cmd_loadedlatency(args):
     targets = [t for t in args.targets.split(",") if t][:2]
     idle = _fping(targets, 10)
     idle_avg = [v["avg_ms"] for v in idle.values() if "avg_ms" in v]
-    chunk = 2000000000
     with cf.ThreadPoolExecutor(max_workers=args.streams + 1) as ex:
-        dl = [ex.submit(_one_download, args.seconds, chunk)
+        dl = [ex.submit(_one_download, args.seconds)
               for _ in range(args.streams)]
         time.sleep(1)
         loaded = ex.submit(_fping, targets, max(10, args.seconds * 4), 250).result()

@@ -80,6 +80,24 @@ config gluetun prête à l'emploi du provider gagnant.
 
 Le résumé comparatif est aussi imprimé dans les **logs du conteneur**, en clair.
 
+### Quand un tunnel refuse de monter
+
+Chaque échec de connexion est écrit en entier dans `results/failures/`, donc
+consultable sans shell :
+
+```
+http://<ip-du-nas>:8888/failures/
+```
+
+Le fichier contient l'état du conteneur gluetun, son code de sortie et
+**l'intégralité de ses logs**, pour les deux tentatives (serveur épinglé, puis
+repli sur le pays seul). Les mêmes messages apparaissent dans la section
+*Incidents* du rapport HTML. Pour aller plus loin :
+`BENCH_GLUETUN_LOG_LEVEL=debug`.
+
+gluetun n'a pas à figurer dans la stack : l'orchestrateur crée et détruit
+lui-même un conteneur `vpnbench-vpn` pour chaque serveur testé.
+
 ### Enchaîner les campagnes
 
 | Étape | Action dans Portainer |
@@ -114,6 +132,7 @@ donc rien d'autre à remplir pour démarrer.
 | `TZ` | `Europe/Paris` | fuseau horaire des logs et du rapport |
 | `PROTON_WIREGUARD_ADDRESSES` | `10.2.0.2/32` | adresse fournie avec la config Proton |
 | `GLUETUN_IMAGE` | `qmcgaw/gluetun:v3.40` | version de gluetun évaluée |
+| `BENCH_GLUETUN_LOG_LEVEL` | `info` | `debug` pour diagnostiquer un tunnel qui ne monte pas |
 | `BENCH_IMAGE` | image GHCR | pour épingler un tag précis, ex. `…:sha-c8e7851` |
 | `BENCH_WEB_PORT` | `8888` | port du rapport **côté NAS** (mapping du compose) |
 

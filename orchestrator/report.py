@@ -82,6 +82,8 @@ def print_summary(agg, scores, overhead, verdict, log=print):
                verdict.get("gap"), verdict.get("confidence")))
         for r in verdict.get("top_reasons", []):
             log("   + meilleur sur %s" % r)
+    else:
+        log("PAS DE VERDICT : %s" % verdict.get("reason", "donnees insuffisantes"))
     log("")
 
 
@@ -194,6 +196,11 @@ def build_html(db, cfg, agg, scores, overhead, verdict, run_id):
              % (html.escape(cfg.mode_name), len(cases), now, html.escape(run_id)))
 
     # --- verdict
+    if not verdict.get("winner"):
+        h.append('<div class="verdict"><div class="k">Pas de verdict</div>'
+                 '<div class="big">Campagne inexploitable</div>'
+                 '<div class="sub" style="margin:6px 0 0">%s</div></div>'
+                 % html.escape(verdict.get("reason", "donnees insuffisantes")))
     if verdict.get("winner"):
         w = verdict["winner"]
         h.append('<div class="verdict"><div class="k">Gagnant</div>'

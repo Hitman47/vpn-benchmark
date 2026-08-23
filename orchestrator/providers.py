@@ -85,10 +85,34 @@ def _nord_city(s):
 # --------------------------------------------------------------------------
 # ProtonVPN
 # --------------------------------------------------------------------------
+PROTON_ENDPOINTS = (
+    "https://api.protonvpn.ch/vpn/logicals",
+    "https://api.protonmail.ch/vpn/logicals",
+    "https://api.protonvpn.ch/vpn/v1/logicals",
+)
+# l'API Proton rejette les requetes sans en-tetes applicatifs (HTTP 400)
+PROTON_HEADERS = {
+    "User-Agent": "ProtonVPN/4.0.0 (Linux; vpn-benchmark)",
+    "Accept": "application/vnd.protonmail.v1+json",
+    "x-pm-appversion": "LinuxVPN_4.0.0",
+    "x-pm-apiversion": "3",
+}
+
+
+def _proton_get():
+    last = None
+    for url in PROTON_ENDPOINTS:
+        try:
+            return _get_json(url, headers=PROTON_HEADERS)
+        except Exception as e:
+            last = "%s -> %s" % (url, e)
+    raise RuntimeError(last or "aucun endpoint Proton joignable")
+
+
 def proton_servers(country, limit, p2p_only=True):
     """Serveurs logiques Proton payants du pays, tries par charge."""
     iso = ISO.get(country, country[:2].upper())
-    data = _get_json("https://api.protonmail.ch/vpn/logicals")
+    data = _proton_get()
     servers = []
     for s in data.get("LogicalServers", []):
         if s.get("ExitCountry") != iso:
