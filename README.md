@@ -172,6 +172,7 @@ donc rien d'autre à remplir pour démarrer.
 |---|---|---|
 | `BENCH_PING_TARGETS` | `1.1.1.1,8.8.8.8,9.9.9.9` | cibles de latence |
 | `BENCH_WEB_URLS` | 4 sites, voir `bench.yaml` | pages mesurées en TTFB |
+| `BENCH_DOWNLOAD_URLS` | 5 cibles, voir `bench.yaml` | candidates pour la mesure de débit |
 | `BENCH_TORRENTS` | ISO Ubuntu 24.04 | `.torrent` utilisés pour le test P2P |
 
 ### Interne (à ne changer qu'en connaissance de cause)
@@ -197,8 +198,13 @@ décommente le volume `config:/config` dans le compose et dépose ton propre
 
 ## 4. Ce qui est mesuré
 
-**Débit** — Cloudflare speed en multi-flux (8 descendants, 4 montants), débit
-soutenu sur fenêtre bornée. iperf3 en option dans `bench.yaml`.
+**Débit** — multi-flux (8 descendants, 4 montants) sur fenêtre bornée. La cible
+de téléchargement est **choisie automatiquement au démarrage** parmi une liste
+de gros fichiers statiques (OVH, Hetzner, Tele2, Cloudflare) : la plus rapide
+joignable est retenue et **gardée pour tous les cas de la campagne**, sinon la
+comparaison entre providers ne voudrait rien dire. Si la cible se met à répondre
+429/403, c'est signalé dans les logs et le rapport. Montée via Cloudflare `__up`.
+iperf3 en option dans `bench.yaml`.
 
 **Latence** — fping sur 3 cibles : RTT moyen, min, p95, gigue, perte.
 

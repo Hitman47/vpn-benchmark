@@ -22,21 +22,35 @@ from .providers import gluetun_server_env
 CONTROL_PORT = 8000
 PROBE_ENTRY = ["python", "-u", "/app/probe.py"]
 
+# gluetun valide CHAQUE route declaree et refuse de demarrer si l'une d'elles
+# lui est inconnue. La liste varie d'une version a l'autre, donc on part d'un
+# jeu minimal et on retire automatiquement celles qu'il rejette (voir
+# _unsupported_route).
+DEFAULT_AUTH_ROUTES = [
+    "GET /v1/publicip/ip",
+    "GET /v1/openvpn/status",
+    "PUT /v1/openvpn/status",
+    "GET /v1/openvpn/portforwarded",
+    "GET /v1/vpn/status",
+    "PUT /v1/vpn/status",
+]
+
 AUTH_TOML = """# genere par vpn-benchmark : acces local sans authentification
 [[roles]]
 name = "bench"
 routes = [
-  "GET /v1/publicip/ip",
-  "GET /v1/openvpn/status",
-  "PUT /v1/openvpn/status",
-  "GET /v1/openvpn/portforwarded",
-  "GET /v1/portforwarded",
-  "GET /v1/vpn/status",
-  "PUT /v1/vpn/status",
-  "GET /v1/vpn/settings",
+%s
 ]
 auth = "none"
 """
+
+ROUTE_REJECTED = re.compile(
+    r"route not supported by the control server:\s*([A-Z]+ /\S+)")
+
+
+def _unsupported_route(message):
+    m = ROUTE_REJECTED.search(message or "")
+    return m.group(1).strip() if m else None
 
 
 class VPNError(RuntimeError):
@@ -59,6 +73,7 @@ class Runner:
         self.network = self._self_network()
         self.net_subnet = self._network_subnet()
         self.volumes = self._self_volumes()
+        self.auth_routes = list(DEFAULT_AUTH_ROUTES)
         self.auth_volume = self._write_auth_config()
         log("image de sonde : %s" % self.image)
         log("reseau         : %s (%s)" % (self.network, self.net_subnet))
@@ -124,14 +139,15 @@ class Runner:
 
     def _write_auth_config(self):
         """Ecrit la config d'authentification de gluetun dans un volume partage.
-        Retourne le nom du volume, ou None si le volume n'est pas monte."""
+        Retourne le nom du volume, ou None si rien n'a pu etre ecrit."""
         vol = self.volumes.get("/shared/auth")
-        if not vol:
+        if not vol or not self.auth_routes:
             return None
+        body = ",\n".join('  "%s"' % r for r in self.auth_routes)
         try:
             os.makedirs("/shared/auth", exist_ok=True)
             with open("/shared/auth/config.toml", "w", encoding="utf-8") as f:
-                f.write(AUTH_TOML)
+                f.write(AUTH_TOML % body)
             return vol
         except OSError as e:
             self.log("config auth gluetun non ecrite (%s)" % e)
@@ -156,7 +172,24 @@ class Runner:
     def start_vpn(self, provider, server, extra_env=None, pin_server=True):
         """Demarre gluetun. pin_server=False ignore le serveur choisi et laisse
         gluetun piocher dans le pays : utile en repli quand la liste embarquee
-        de gluetun ne connait pas encore ce serveur."""
+        de gluetun ne connait pas encore ce serveur.
+
+        Si gluetun rejette une route de la config d'authentification (la liste
+        change selon les versions), on la retire et on reessaie."""
+        for _ in range(len(DEFAULT_AUTH_ROUTES) + 1):
+            try:
+                return self._start_vpn_once(provider, server, extra_env, pin_server)
+            except VPNError as e:
+                bad = _unsupported_route(str(e))
+                if not bad or bad not in self.auth_routes:
+                    raise
+                self.auth_routes.remove(bad)
+                self.auth_volume = self._write_auth_config()
+                self.log("route '%s' inconnue de cette version de gluetun : "
+                         "retiree de la config d'auth, nouvel essai" % bad)
+        raise VPNError("config d'authentification gluetun irreconciliable")
+
+    def _start_vpn_once(self, provider, server, extra_env=None, pin_server=True):
         name = "%s-vpn" % self.cfg.project
         try:
             self.client.containers.get(name).remove(force=True)
@@ -266,7 +299,7 @@ class Runner:
                        % (timeout, last_err)))
 
     def forwarded_port(self, container):
-        for path in ("/v1/portforwarded", "/v1/openvpn/portforwarded"):
+        for path in ("/v1/openvpn/portforwarded", "/v1/portforwarded"):
             try:
                 r = requests.get(self.control_url(container, path), timeout=5)
                 if r.status_code == 200:

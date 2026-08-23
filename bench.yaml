@@ -54,6 +54,16 @@ targets:
     - https://www.wikipedia.org/
     - https://github.com/
     - https://www.reddit.com/
+  # Cibles de debit descendant : gros fichiers statiques. La campagne en choisit
+  # une au demarrage (la plus rapide joignable) et la garde pour tous les cas,
+  # sinon la comparaison entre providers ne voudrait rien dire.
+  # Cloudflare est en dernier : il repond 429 puis 403 si on l'interroge trop.
+  download:
+    - https://proof.ovh.net/files/1Gb.dat
+    - https://fsn1-speed.hetzner.com/1GB.bin
+    - https://hel1-speed.hetzner.com/1GB.bin
+    - http://speedtest.tele2.net/1GB.zip
+    - https://speed.cloudflare.com/__down?bytes=1000000000
   # Serveurs iperf3 publics (optionnel, laisser vide pour desactiver)
   iperf3: []
   #  - {host: speedtest.serverius.net, port: 5002}

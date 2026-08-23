@@ -6,6 +6,7 @@ JSON unique sur stdout ; toute erreur est capturee et rendue dans le JSON.
 import argparse
 import concurrent.futures as cf
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -13,6 +14,9 @@ import sys
 import time
 
 CURL = ["curl", "-sS", "--connect-timeout", "8"]
+# os.devnull vaut /dev/null dans le conteneur et nul sous Windows : la sonde
+# reste ainsi testable hors conteneur.
+NULL_OUT = os.devnull
 
 
 def sh(cmd, timeout=60):
@@ -120,30 +124,22 @@ DOWN_URL = "https://speed.cloudflare.com/__down?bytes={n}"
 UP_URL = "https://speed.cloudflare.com/__up"
 
 
-# Cloudflare refuse les tailles trop grandes : on enchaine des morceaux courts
-# dans UN SEUL appel curl, ce qui reutilise la connexion TLS d'un morceau a
-# l'autre. C'est --max-time qui borne la mesure, pas le nombre de morceaux.
-CHUNK_BYTES = 10000000
-MAX_CHUNKS = 1200
-
-
-def _one_download(seconds, chunk_bytes=CHUNK_BYTES, chunks=MAX_CHUNKS):
-    url = DOWN_URL.format(n=chunk_bytes)
-    cmd = CURL + ["--max-time", str(seconds), "-o", "/dev/null",
-                  "-w", "%{size_download} %{http_code}\n"] + [url] * chunks
-    rc, so, se = sh(cmd, timeout=seconds + 25)
-    total, codes = 0.0, set()
-    for line in so.splitlines():
-        parts = line.split()
-        if len(parts) != 2:
-            continue
+# UNE seule requete par flux, coupee par --max-time : enchainer les requetes
+# fait tomber Cloudflare en 429 puis 403. La cible doit donc etre un gros
+# fichier statique, et elle est choisie au demarrage de la campagne (pickdl)
+# pour rester identique a tous les cas mesures.
+def _one_download(seconds, url=None):
+    url = url or DOWN_URL.format(n=1000000000)
+    rc, so, se = sh(CURL + ["--max-time", str(seconds), "-o", NULL_OUT,
+                            "-w", "%{size_download} %{http_code}", url],
+                    timeout=seconds + 20)
+    parts = so.split()
+    if len(parts) >= 2:
         try:
-            total += float(parts[0])
+            return float(parts[0]), parts[1]
         except ValueError:
-            continue
-        codes.add(parts[1])
-    info = ",".join(sorted(codes)) if codes else "curl_rc=%d %s" % (rc, se[:120])
-    return total, info
+            pass
+    return 0.0, "rc%d" % rc
 
 
 def _one_upload(seconds, mbytes):
@@ -179,9 +175,10 @@ def _parallel(fn, streams, *fnargs):
 def cmd_throughput(args):
     res = {"ok": False}
     down_mbps, down_bytes, down_wall, down_info = _parallel(
-        _one_download, args.streams, args.seconds)
+        _one_download, args.streams, args.seconds, args.url)
     res.update({"down_mbps": down_mbps, "down_bytes": down_bytes,
-                "down_seconds": down_wall, "down_http": down_info})
+                "down_seconds": down_wall, "down_http": down_info,
+                "down_url": args.url})
     if not args.skip_upload:
         up_streams = max(1, args.streams // 2)
         up_mbps, up_bytes, up_wall, up_info = _parallel(
@@ -194,6 +191,21 @@ def cmd_throughput(args):
     return res
 
 
+def cmd_pickdl(args):
+    """Classe les cibles de debit candidates. Appele une fois au demarrage de
+    la campagne, hors tunnel, pour que tous les cas partagent la meme cible."""
+    results = []
+    for url in [u for u in args.urls.split(",") if u]:
+        mbps, total, wall, info = _parallel(
+            _one_download, args.streams, args.seconds, url)
+        results.append({"url": url, "mbps": mbps,
+                        "mb": round(total / 1e6, 1), "http": info})
+    results.sort(key=lambda r: -r["mbps"])
+    return {"ok": bool(results and results[0]["mbps"] > 0),
+            "best": results[0]["url"] if results else None,
+            "candidates": results}
+
+
 # --------------------------------------------------------------------------
 # latence sous charge (bufferbloat)
 # --------------------------------------------------------------------------
@@ -202,7 +214,7 @@ def cmd_loadedlatency(args):
     idle = _fping(targets, 10)
     idle_avg = [v["avg_ms"] for v in idle.values() if "avg_ms" in v]
     with cf.ThreadPoolExecutor(max_workers=args.streams + 1) as ex:
-        dl = [ex.submit(_one_download, args.seconds)
+        dl = [ex.submit(_one_download, args.seconds, args.url)
               for _ in range(args.streams)]
         time.sleep(1)
         loaded = ex.submit(_fping, targets, max(10, args.seconds * 4), 250).result()
@@ -235,7 +247,7 @@ def cmd_web(args):
     for url in urls:
         samples = []
         for _ in range(args.repeats):
-            rc, so, se = sh(CURL + ["--max-time", "25", "-o", "/dev/null",
+            rc, so, se = sh(CURL + ["--max-time", "25", "-o", NULL_OUT,
                                     "-L", "-w", WFMT, url], timeout=35)
             if rc != 0:
                 continue
@@ -341,7 +353,7 @@ def cmd_mtu(args):
 # joignabilite binaire (sert au test de kill-switch)
 # --------------------------------------------------------------------------
 def cmd_reach(args):
-    rc, so, _ = sh(CURL + ["--max-time", str(args.timeout), "-o", "/dev/null",
+    rc, so, _ = sh(CURL + ["--max-time", str(args.timeout), "-o", NULL_OUT,
                            "-w", "%{http_code}", args.url],
                    timeout=args.timeout + 5)
     return {"ok": True, "reachable": rc == 0, "http_code": so.strip()}
@@ -380,12 +392,19 @@ def build_parser():
     p = sub.add_parser("throughput")
     p.add_argument("--seconds", type=int, default=10)
     p.add_argument("--streams", type=int, default=8)
+    p.add_argument("--url", default=None)
     p.add_argument("--skip-upload", action="store_true")
+
+    p = sub.add_parser("pickdl")
+    p.add_argument("--urls", required=True)
+    p.add_argument("--seconds", type=int, default=4)
+    p.add_argument("--streams", type=int, default=8)
 
     p = sub.add_parser("loadedlatency")
     p.add_argument("--targets", default="1.1.1.1,8.8.8.8")
     p.add_argument("--seconds", type=int, default=10)
     p.add_argument("--streams", type=int, default=8)
+    p.add_argument("--url", default=None)
 
     p = sub.add_parser("web")
     p.add_argument("--urls", required=True)

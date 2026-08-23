@@ -39,6 +39,7 @@ services:
       # --- cibles de mesure (listes separees par des virgules) ---------------
       BENCH_PING_TARGETS: ${BENCH_PING_TARGETS:-}
       BENCH_WEB_URLS: ${BENCH_WEB_URLS:-}
+      BENCH_DOWNLOAD_URLS: ${BENCH_DOWNLOAD_URLS:-}
       BENCH_TORRENTS: ${BENCH_TORRENTS:-}
       # --- interne ----------------------------------------------------------
       BENCH_HTTP_PORT: 8888                     # port dans le conteneur

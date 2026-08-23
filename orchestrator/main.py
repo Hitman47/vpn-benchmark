@@ -69,6 +69,29 @@ class Bench:
         self.p2p = P2PTester(self.runner, cfg, log)
         self.baseline_asn = None
         self.baseline_ip = None
+        self.download_url = None
+
+    # ------------------------------------------------------------------
+    def pick_download_target(self):
+        """Choisit une fois pour toutes la cible de debit descendant : tous les
+        cas doivent partager la meme, sinon la comparaison n'a aucun sens."""
+        urls = self.cfg.targets.get("download") or []
+        if not urls:
+            return None
+        if len(urls) == 1:
+            return urls[0]
+        log("choix de la cible de debit (%d candidates)" % len(urls))
+        r = self.runner.probe(
+            None, ["pickdl", "--urls", ",".join(urls), "--seconds", "4",
+                   "--streams", str(self.cfg.m("throughput_streams", 8))],
+            timeout=len(urls) * 40 + 60)
+        for c in r.get("candidates", []):
+            log("  %-52s %8s Mb/s  http=%s"
+                % (c["url"][:52], c["mbps"], c["http"]))
+        best = r.get("best") or urls[0]
+        log("cible retenue : %s" % best)
+        self.db.log(self.run_id, None, "info", "cible de debit : %s" % best)
+        return best
 
     # ------------------------------------------------------------------
     def build_matrix(self):
@@ -101,6 +124,16 @@ class Bench:
             log("  detail complet : /failures/%s.log" % case_id)
         except OSError as e:
             log("  impossible d'ecrire le detail de l'echec (%s)" % e)
+
+    def _check_throttling(self, case_id, throughput):
+        """Une cible qui repond 429/403 fausse la mesure : on le trace."""
+        info = str(throughput.get("down_http") or "")
+        if any(code in info for code in ("429", "403", "503")):
+            self.db.log(self.run_id, case_id, "warn",
+                        "cible de debit limitee (http %s) : mesure descendante "
+                        "sous-estimee" % info)
+            log("  ATTENTION : la cible de debit repond %s, valeur sous-estimee"
+                % info)
 
     def _record_common(self, case_id, latency, throughput, loaded, web):
         if latency.get("ok"):
@@ -146,17 +179,21 @@ class Bench:
                                            "--count", str(self.cfg.m("latency_count", 20))])
         throughput = self.runner.probe(
             None, ["throughput", "--seconds", str(self.cfg.m("throughput_seconds", 10)),
-                   "--streams", str(self.cfg.m("throughput_streams", 8))])
+                   "--streams", str(self.cfg.m("throughput_streams", 8))]
+            + (["--url", self.download_url] if self.download_url else []))
         loaded = self.runner.probe(
             None, ["loadedlatency", "--targets", ",".join(self.cfg.targets["ping"][:2]),
                    "--seconds", str(self.cfg.m("throughput_seconds", 10)),
-                   "--streams", str(self.cfg.m("throughput_streams", 8))])
+                   "--streams", str(self.cfg.m("throughput_streams", 8))]
+            + (["--url", self.download_url] if self.download_url else []))
         web = self.runner.probe(None, ["web", "--urls", ",".join(self.cfg.targets["web"]),
                                        "--repeats", str(self.cfg.m("web_repeats", 2))])
         self._record_common(case_id, latency, throughput, loaded, web)
-        log("  baseline : %s Mb/s down, %s Mb/s up, %s ms"
+        self._check_throttling(case_id, throughput)
+        log("  baseline : %s Mb/s down, %s Mb/s up, %s ms  [http %s | %s]"
             % (throughput.get("down_mbps"), throughput.get("up_mbps"),
-               (latency.get("aggregate") or {}).get("avg_ms")))
+               (latency.get("aggregate") or {}).get("avg_ms"),
+               throughput.get("down_http"), throughput.get("up_http")))
 
     # ------------------------------------------------------------------
     def run_case(self, provider, server, rnd, do_p2p):
@@ -230,22 +267,25 @@ class Bench:
             sampler.start()
             throughput = self.runner.probe(
                 vpn, ["throughput", "--seconds", str(self.cfg.m("throughput_seconds", 10)),
-                      "--streams", str(self.cfg.m("throughput_streams", 8))])
+                      "--streams", str(self.cfg.m("throughput_streams", 8))]
+                + (["--url", self.download_url] if self.download_url else []))
             cpu = sampler.stop()
             self.metric(case_id, "cpu_avg_pct", cpu.get("cpu_avg_pct"), "%")
             self.metric(case_id, "cpu_max_pct", cpu.get("cpu_max_pct"), "%")
             loaded = self.runner.probe(
                 vpn, ["loadedlatency", "--targets", ",".join(self.cfg.targets["ping"][:2]),
                       "--seconds", str(self.cfg.m("throughput_seconds", 10)),
-                      "--streams", str(self.cfg.m("throughput_streams", 8))])
+                      "--streams", str(self.cfg.m("throughput_streams", 8))]
+                + (["--url", self.download_url] if self.download_url else []))
             web = self.runner.probe(
                 vpn, ["web", "--urls", ",".join(self.cfg.targets["web"]),
                       "--repeats", str(self.cfg.m("web_repeats", 2))])
             self._record_common(case_id, latency, throughput, loaded, web)
-            log("  %s Mb/s down, %s Mb/s up, %s ms, CPU max %s%%"
+            self._check_throttling(case_id, throughput)
+            log("  %s Mb/s down, %s Mb/s up, %s ms, CPU max %s%%  [http %s]"
                 % (throughput.get("down_mbps"), throughput.get("up_mbps"),
                    (latency.get("aggregate") or {}).get("avg_ms"),
-                   cpu.get("cpu_max_pct")))
+                   cpu.get("cpu_max_pct"), throughput.get("down_http")))
             if (cpu.get("cpu_max_pct") or 0) > 90:
                 self.db.log(self.run_id, case_id, "warn",
                             "CPU du conteneur VPN sature : le serveur, pas le VPN, "
@@ -338,6 +378,7 @@ class Bench:
         rounds = self.cfg.m("rounds", 1)
         interval = self.cfg.m("interval_seconds", 0)
         p2p_every = self.cfg.m("p2p_every_rounds", 1)
+        self.download_url = self.pick_download_target()
         log("selection des serveurs")
         matrix = self.build_matrix()
         order = list(self.cfg.providers)

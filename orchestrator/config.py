@@ -117,6 +117,9 @@ class Config:
         lst = _env_list("BENCH_WEB_URLS")
         if lst:
             self.targets["web"] = lst
+        lst = _env_list("BENCH_DOWNLOAD_URLS")
+        if lst:
+            self.targets["download"] = lst
         lst = _env_list("BENCH_TORRENTS")
         if lst:
             self.p2p["torrents"] = lst
