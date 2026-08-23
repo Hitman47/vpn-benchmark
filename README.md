@@ -4,7 +4,8 @@ Stack Docker qui compare deux fournisseurs WireGuard **au niveau du réseau, pas
 d'un seul serveur** : plusieurs serveurs, plusieurs pays, plusieurs rounds
 étalés dans le temps, avec une mesure sans VPN (baseline) à chaque round.
 
-Conçue pour être déployée **depuis Portainer, sans aucun accès shell au NAS**.
+Conçue pour être déployée **depuis Portainer, sans aucun accès shell au NAS** :
+l'image est publiée sur GHCR par GitHub Actions, Portainer n'a qu'à la tirer.
 Un seul conteneur est déclaré ; il pilote lui-même les conteneurs gluetun,
 qBittorrent et les sondes via le socket Docker, puis publie le rapport sur un
 port HTTP.
@@ -14,15 +15,19 @@ mesures est exactement ce que verra ton conteneur applicatif en production**.
 
 ---
 
-## 1. Déploiement (méthode recommandée : dépôt Git)
+## 1. Déploiement dans Portainer
 
-Aucune image à publier, aucune commande sur le NAS.
+L'image est publiée automatiquement sur **GitHub Container Registry** par
+GitHub Actions à chaque push sur `main` :
 
-1. Pousse ce dossier sur un dépôt Git (GitHub, Gitea, privé ou public).
-2. Portainer → **Stacks** → **Add stack** → onglet **Repository**
-   - *Repository URL* : l'URL du dépôt
-   - *Compose path* : `docker-compose.yml`
-   - *Pull latest image* : **désactivé** (l'image est construite localement)
+```
+ghcr.io/hitman47/vpn-benchmark:latest
+```
+
+Rien n'est construit sur le NAS, rien n'est à construire sur ton PC.
+
+1. Portainer → **Stacks** → **Add stack** → onglet **Web editor**
+2. Colle le contenu de [`docker-compose.yml`](docker-compose.yml)
 3. Dans **Environment variables**, ajoute au minimum :
 
    | Nom | Valeur |
@@ -32,20 +37,32 @@ Aucune image à publier, aucune commande sur le NAS.
    | `LAN_SUBNET` | ton sous-réseau, ex. `192.168.1.0/24` |
    | `BENCH_MODE` | `smoke` pour le premier run |
 
-4. **Deploy the stack**. Portainer construit l'image puis démarre la campagne.
+4. **Deploy the stack** — Portainer tire l'image et démarre la campagne.
 5. Suis l'avancement dans les logs du conteneur `vpnbench-orchestrator`.
 
-## 1 bis. Déploiement sans dépôt Git
+Variante *Repository* (Portainer suit le dépôt Git) : URL du dépôt, compose
+path `docker-compose.yml`, **Pull latest image activé**. Le `pull_policy: always`
+du compose garantit que la dernière image publiée est récupérée à chaque
+redéploiement.
 
-Si tu préfères coller un compose dans le **Web editor**, il faut une image déjà
-publiée. Depuis ton PC Windows, une seule fois :
+### Mettre à jour l'image
 
-```powershell
-.\publish.ps1 -Image ghcr.io/mon-compte/vpn-benchmark:latest
+Chaque push sur `main` déclenche le workflow
+[`.github/workflows/publish.yml`](.github/workflows/publish.yml) qui republie
+`:latest` et un tag `:sha-xxxxxxx`. Côté Portainer : *Update the stack* →
+*Re-pull image and redeploy*.
+
+### Construire en local (développement)
+
+Pour tester une modification sans passer par GHCR :
+
+```bash
+docker compose -f docker-compose.build.yml up --build
 ```
 
-Puis colle le contenu de `docker-compose.registry.yml` dans Portainer et
-renseigne `BENCH_IMAGE` avec ce tag.
+`publish.ps1` / `publish.sh` restent disponibles pour publier une image à la
+main vers un autre registre, mais ne sont plus nécessaires au fonctionnement
+normal.
 
 ---
 
@@ -212,9 +229,10 @@ surveille le CPU du conteneur gluetun et lève un avertissement au-delà de 90 %
 
 ```
 Dockerfile                    image unique (orchestrateur + sonde)
-docker-compose.yml            stack Portainer, construite depuis le dépôt Git
-docker-compose.registry.yml   stack Portainer, image tirée d'un registre
-publish.ps1 / publish.sh      publication de l'image depuis ton PC
+.github/workflows/publish.yml build + push vers GHCR a chaque push sur main
+docker-compose.yml            stack Portainer, image tirée de GHCR
+docker-compose.build.yml      variante développement, construction locale
+publish.ps1 / publish.sh      publication manuelle vers un autre registre
 bench.yaml                    pays, durées, cibles, torrents, poids du score
 orchestrator/
   main.py                     boucle rounds -> baseline -> providers -> serveurs

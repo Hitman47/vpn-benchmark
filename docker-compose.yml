@@ -1,20 +1,18 @@
 # =============================================================================
 # Stack Portainer - VPN Benchmark (NordVPN vs ProtonVPN)
 #
-# Methode recommandee : Portainer > Stacks > Add stack > Repository
-#   - Repository URL      : l'URL de ton depot Git
-#   - Compose path        : docker-compose.yml
-#   - Laisse "Pull latest image" DESACTIVE (l'image est construite localement)
-#   - Renseigne les variables d'environnement plus bas dans le formulaire
+# L'image est publiee sur GitHub Container Registry par GitHub Actions a chaque
+# push sur main. Rien n'est construit sur le NAS.
 #
-# Si tu preferes coller un compose sans depot Git, utilise
-# docker-compose.registry.yml (necessite une image deja publiee).
+# Portainer > Stacks > Add stack > Web editor : colle ce fichier, renseigne les
+# variables d'environnement, deploie.
+# Ou via Repository : URL du depot, compose path docker-compose.yml,
+# "Pull latest image" ACTIVE pour recuperer la derniere image publiee.
 # =============================================================================
 services:
   vpnbench:
-    # image locale construite depuis le depot ; compose la construit si absente
-    image: ${BENCH_IMAGE:-vpnbench:latest}
-    build: .
+    image: ${BENCH_IMAGE:-ghcr.io/hitman47/vpn-benchmark:latest}
+    pull_policy: always
     container_name: vpnbench-orchestrator   # ne pas renommer : le conteneur s'auto-inspecte
     environment:
       # --- obligatoire ------------------------------------------------------

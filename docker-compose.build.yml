@@ -1,16 +1,14 @@
 # =============================================================================
-# Stack Portainer - VPN Benchmark (NordVPN vs ProtonVPN)
+# Variante developpement : construit l'image localement au lieu de la tirer
+# de GHCR. Utile pour tester une modification avant de la pousser.
 #
-# Variante "image publiee" : a coller dans Portainer > Stacks > Add stack >
-# Web editor. Aucune construction sur le NAS, l'image est tiree du registre.
-#
-# Prerequis : avoir publie l'image une fois depuis ton PC (voir publish.ps1)
-# et remplacer BENCH_IMAGE ci-dessous par ton tag.
+#   docker compose -f docker-compose.build.yml up --build
 # =============================================================================
 services:
   vpnbench:
-    # image publiee : remplace la valeur par defaut par ton tag
-    image: ${BENCH_IMAGE:-ghcr.io/CHANGE-MOI/vpn-benchmark:latest}
+    # construction locale, pour developper sans passer par GHCR
+    image: ${BENCH_IMAGE:-vpnbench:dev}
+    build: .
     container_name: vpnbench-orchestrator   # ne pas renommer : le conteneur s'auto-inspecte
     environment:
       # --- obligatoire ------------------------------------------------------
